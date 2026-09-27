@@ -24,6 +24,21 @@ Digest block_hash_v2(const UUID& uuid, uint32_t group, uint32_t shard, const Byt
 Bytes compress_frame(const Bytes& data);
 Bytes decompress_frame(const Bytes& data, uint32_t size);
 
+// A complete independent frame decoder; one context per worker. Context storage
+// and failed output buffers are wiped before release, including on cancellation.
+class FrameDecoder {
+public:
+    FrameDecoder();
+    ~FrameDecoder();
+    FrameDecoder(const FrameDecoder&) = delete;
+    FrameDecoder& operator=(const FrameDecoder&) = delete;
+    Bytes decode(const Bytes& data, uint32_t size);
+    static size_t memory_usage();
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
 // Process-scoped Jerasure field state is initialized once. CLI operations are serial.
 // Profile 1: systematic Cauchy, GF(256)/0x11d, A[row,col] = inv(row XOR (2+col)).
 class ReedSolomon {

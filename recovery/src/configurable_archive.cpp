@@ -1,7 +1,10 @@
 #include "configurable.hpp"
+#include "paged.hpp"
 #include "protected.hpp"
 #include "compression_progress.hpp"
 #include "recovery_pool.hpp"
+#include "decompression_pool.hpp"
+#include "read_progress.hpp"
 #include <algorithm>
 #include <cstring>
 #include <map>
@@ -11,6 +14,7 @@
 #include <stdexcept>
 #include <mutex>
 #include <thread>
+#include <sys/resource.h>
 
 namespace rz {
 namespace {
@@ -110,15 +114,26 @@ Archive2 load(const fs::path& directory) {
     }
     return a;
 }
-// Bounded open-file count, independent of archive size and user volume size.
+// Keep spare descriptors for the runtime, staging, metadata and concurrent IO.
+// Repair has two caches, so it divides this process-wide allowance between them.
+size_t descriptor_budget(size_t consumers = 1) {
+    struct rlimit limit{};
+    uint64_t available = 256;
+    if (::getrlimit(RLIMIT_NOFILE, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY)
+        available = limit.rlim_cur > 32 ? limit.rlim_cur - 32 : 1;
+    return static_cast<size_t>(std::max<uint64_t>(1, std::min<uint64_t>(available, 4096) / consumers));
+}
+// Retain a full stripe's descriptors when the process limit allows it, while
+// remaining bounded for archives with many small physical volumes.
 class FileCache {
 public:
-    FileCache(fs::path root, File::Mode mode, std::string suffix = "") : root_(std::move(root)), mode_(mode), suffix_(std::move(suffix)) {}
+    FileCache(fs::path root, File::Mode mode, size_t count, size_t consumers = 1)
+        : root_(std::move(root)), mode_(mode), capacity_(std::min(count, descriptor_budget(consumers))) {}
     File& get(bool parity, uint32_t volume) {
-        auto name = configurable_volume_name(parity, volume) + suffix_;
+        auto name = configurable_volume_name(parity, volume);
         auto it = cache_.find(name);
         if (it == cache_.end()) {
-            if (cache_.size() == 16) {
+            if (cache_.size() == capacity_) {
                 auto oldest = std::min_element(cache_.begin(), cache_.end(), [](const auto& a, const auto& b) { return a.second.age < b.second.age; });
                 cache_.erase(oldest);
             }
@@ -129,7 +144,7 @@ public:
     void clear() { cache_.clear(); }
 private:
     struct Cached { std::unique_ptr<File> file; uint64_t age; };
-    fs::path root_; File::Mode mode_; std::string suffix_; uint64_t age_ = 0;
+    fs::path root_; File::Mode mode_; size_t capacity_; uint64_t age_ = 0;
     std::map<std::string, Cached> cache_;
 };
 std::vector<int> read_group(const Archive2& a, FileCache& files, uint32_t index, uint64_t data_start, uint64_t parity_start, std::vector<Bytes>& blocks) {
@@ -146,16 +161,63 @@ std::vector<int> read_group(const Archive2& a, FileCache& files, uint32_t index,
     }
     return missing;
 }
-Verification scan(const Archive2& a) {
+Verification scan(const Archive2& a, uint32_t requested = 0, ReadProgress* progress = nullptr) {
     Verification result; result.metadata_issues = a.metadata_issues;
-    FileCache files(a.directory, File::Mode::Read); std::vector<Bytes> blocks;
-    uint64_t data_start = 0, parity_start = 0;
-    for (uint32_t i = 0; i < a.manifest.groups.size(); ++i) {
-        const auto& g = a.manifest.groups[i]; auto missing = read_group(a, files, i, data_start, parity_start, blocks);
-        result.bad_blocks += missing.size();
-        result.bad_data_blocks += std::count_if(missing.begin(), missing.end(), [&](int s) { return s < static_cast<int>(g.k); });
-        if (missing.size() > g.m) ++result.unrecoverable_stripes;
-        data_start += g.k; parity_start += g.m;
+    const auto& m = a.manifest;
+    std::vector<uint64_t> data_starts{0}, parity_starts{0};
+    data_starts.reserve(m.groups.size() + 1); parity_starts.reserve(m.groups.size() + 1);
+    for (const auto& g : m.groups) {
+        data_starts.push_back(data_starts.back() + g.k);
+        parity_starts.push_back(parity_starts.back() + g.m);
+    }
+    std::vector<uint32_t> missing(m.groups.size());
+    const auto data_count = m.volume_count(false), total_count = data_count + m.volume_count(true);
+    const auto bytes = (m.data_blocks + m.recovery_blocks) * BlockSize;
+    if (progress) progress->start("storage", bytes);
+    const auto desired = requested ? requested : std::max(1U, std::thread::hardware_concurrency());
+    const auto workers = std::min({uint64_t(total_count), uint64_t(desired),
+        uint64_t(4), uint64_t(descriptor_budget()), (bytes + 1024 * 1024 - 1) / (1024 * 1024)});
+    std::atomic<uint32_t> next{0}; std::atomic<uint64_t> bad_data{0}; std::atomic<bool> stopped{false};
+    std::mutex mutex; std::exception_ptr error;
+    // Volume-major reads keep each descriptor open exactly once and access its
+    // payload sequentially. Workers only retain one block apiece.
+    auto run = [&] {
+        try {
+            Bytes block(BlockSize);
+            while (!stopped.load(std::memory_order_relaxed)) {
+                const auto index = next.fetch_add(1); if (index >= total_count) break;
+                const bool parity = index >= data_count; const auto volume = parity ? index - data_count : index;
+                const auto count = m.volume_count(parity);
+                const auto& starts = parity ? parity_starts : data_starts;
+                File file(a.directory / configurable_volume_name(parity, volume), File::Mode::Read, true);
+                const auto length = m.payload_size(parity, volume) / BlockSize;
+                for (uint64_t local = 0; local < length; ++local) {
+                    check_cancel(); if (stopped.load(std::memory_order_relaxed)) return;
+                    const auto logical = local * count + volume;
+                    const auto group = static_cast<uint32_t>(std::upper_bound(starts.begin(), starts.end(), logical) - starts.begin() - 1);
+                    const auto column = static_cast<uint32_t>(logical - starts[group]) + (parity ? m.groups[group].k : 0);
+                    if (!file.read(HeaderSize + a.encoded.size() + local * BlockSize, block.data(), block.size()) ||
+                        block_hash_v2(m.uuid, group, column, block) != m.groups[group].hashes[column]) {
+                        std::atomic_ref<uint32_t>(missing[group]).fetch_add(1, std::memory_order_relaxed);
+                        if (!parity) bad_data.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    if (progress) progress->advance(BlockSize);
+                }
+            }
+        } catch (...) {
+            { std::lock_guard lock(mutex); if (!error) error = std::current_exception(); }
+            stopped.store(true, std::memory_order_relaxed);
+        }
+    };
+    std::vector<std::jthread> threads;
+    try { for (size_t i = 1; i < workers; ++i) threads.emplace_back(run); }
+    catch (...) { stopped.store(true, std::memory_order_relaxed); throw; }
+    run(); threads.clear();
+    if (error) std::rethrow_exception(error);
+    result.bad_data_blocks = bad_data.load(std::memory_order_relaxed);
+    for (size_t i = 0; i < m.groups.size(); ++i) {
+        result.bad_blocks += missing[i];
+        if (missing[i] > m.groups[i].m) ++result.unrecoverable_stripes;
     }
     return result;
 }
@@ -166,7 +228,7 @@ void write_sidecar(const fs::path& directory, const Archive2& a) {
     File file(directory / "manifest.rzm", File::Mode::New);
     file.append(a.encoded); file.append(a.digest.data(), a.digest.size()); file.sync();
 }
-// Each task owns its input/output files. Only profile 4 opts into concurrent
+// Each task owns its output file. Only profile 4 opts into concurrent
 // finalization; cap IO fan-out and join all workers before staging can be removed.
 size_t write_volumes(const fs::path& directory, const Archive2& a, uint32_t requested) {
     const auto data = a.manifest.volume_count(false), count = data + a.manifest.volume_count(true);
@@ -182,15 +244,12 @@ size_t write_volumes(const fs::path& directory, const Archive2& a, uint32_t requ
                 const auto index = next.fetch_add(1); if (index >= count) break;
                 const bool parity = index >= data; const auto volume = parity ? index - data : index;
                 auto name = configurable_volume_name(parity, volume); auto h = header_for(a, parity, volume);
-                File file(directory / name, File::Mode::New); file.append(make_header(h, false)); file.append(a.encoded);
-                File payload(directory / (name + ".tmp"));
-                Bytes block(BlockSize);
-                for (uint64_t offset = 0; offset < h.payload_size; offset += BlockSize) {
-                    if (stopped.load()) return;
-                    if (!payload.read(offset, block.data(), block.size())) throw std::runtime_error("Truncated source during copy");
-                    file.append(block);
-                }
-                file.append(a.encoded); file.append(make_header(h, true)); file.sync(); fs::remove(directory / (name + ".tmp"));
+                File file(directory / name, File::Mode::Update);
+                if (file.size() != HeaderSize + a.encoded.size() + h.payload_size)
+                    throw std::runtime_error("Staged volume payload size changed");
+                file.write(0, make_header(h, false)); file.write(HeaderSize, a.encoded);
+                file.write(HeaderSize + a.encoded.size() + h.payload_size, a.encoded);
+                file.write(HeaderSize + 2 * a.encoded.size() + h.payload_size, make_header(h, true)); file.sync();
             }
         } catch (...) {
             { std::lock_guard lock(mutex); if (!error) error = std::current_exception(); }
@@ -206,7 +265,7 @@ size_t write_volumes(const fs::path& directory, const Archive2& a, uint32_t requ
 }
 class StreamReader {
 public:
-    explicit StreamReader(const Archive2& a) : a_(a), files_(a.directory, File::Mode::Read) {}
+    explicit StreamReader(const Archive2& a) : a_(a), files_(a.directory, File::Mode::Read, a.manifest.volume_count(false)) {}
     Bytes read(uint64_t offset, uint32_t size) {
         if (offset > a_.manifest.stream_size || size > a_.manifest.stream_size - offset) throw std::runtime_error("Frame outside stream");
         Bytes out(size); size_t done = 0; auto count = a_.manifest.volume_count(false);
@@ -214,19 +273,15 @@ public:
             auto block = offset / BlockSize, local = offset % BlockSize;
             auto n = static_cast<size_t>(std::min<uint64_t>(size - done, BlockSize - local));
             auto& file = files_.get(false, static_cast<uint32_t>(block % count));
-            if (a_.manifest.profile >= 3) {
-                if (cached_block_ != block) {
-                    const auto width = a_.manifest.profile == 4 ? a_.manifest.options.data_volumes : MaxDataShards;
-                    uint32_t group = static_cast<uint32_t>(block / width), column = static_cast<uint32_t>(block % width);
-                    if (!file.read(HeaderSize + a_.encoded.size() + (block / count) * BlockSize, cached_.data(), cached_.size()) ||
-                        block_hash_v2(a_.manifest.uuid, group, column, cached_) != a_.manifest.groups.at(group).hashes.at(column))
-                        throw std::runtime_error("Data blocks are damaged or missing; run repair first");
-                    cached_block_ = block;
-                }
-                std::copy_n(cached_.data() + local, n, out.data() + done);
-            } else if (!file.read(HeaderSize + a_.encoded.size() + (block / count) * BlockSize + local, out.data() + done, n)) {
-                throw std::runtime_error("Missing frame bytes; run repair first");
+            if (cached_block_ != block) {
+                const auto width = a_.manifest.profile == 4 ? a_.manifest.options.data_volumes : MaxDataShards;
+                uint32_t group = static_cast<uint32_t>(block / width), column = static_cast<uint32_t>(block % width);
+                if (!file.read(HeaderSize + a_.encoded.size() + (block / count) * BlockSize, cached_.data(), cached_.size()) ||
+                    block_hash_v2(a_.manifest.uuid, group, column, cached_) != a_.manifest.groups.at(group).hashes.at(column))
+                    throw std::runtime_error("Data blocks are damaged or missing; run repair first");
+                cached_block_ = block;
             }
+            std::copy_n(cached_.data() + local, n, out.data() + done);
             offset += n; done += n;
         }
         return out;
@@ -236,8 +291,19 @@ private:
     uint64_t cached_block_ = UINT64_MAX;
     Bytes cached_ = Bytes(BlockSize);
 };
+Verification verify_loaded(Archive2& a, const ArchiveKeys* keys, uint32_t threads = 0, ReadProgress* progress = nullptr) {
+    auto result = scan(a, threads, progress);
+    if (result.exit_code() == 0 && a.manifest.profile >= 3 && (!a.manifest.security.encrypted || keys)) {
+        StreamReader stream(a);
+        RecordReader read = [&](uint64_t o, uint32_t n) { return stream.read(o, n); };
+        unlock_index(a.manifest, read, keys);
+        verify_private_records(a.manifest, read, keys, threads, progress);
+    }
+    return result;
+}
 }
 bool uses_configurable_profile(const fs::path& directory) {
+    if (uses_paged_profile(directory)) return true;
     require_directory(directory);
     File sidecar(directory / "manifest.rzm", File::Mode::Read, true); Bytes b(8);
     if (sidecar.read(0, b.data(), b.size()) && (magic(b, "RZIDX002") || magic(b, "RZIDX003") || magic(b, "RZIDX004"))) return true;
@@ -250,6 +316,10 @@ bool uses_configurable_profile(const fs::path& directory) {
     return false;
 }
 void create_configurable_archive(const InputPlan& plan, const fs::path& output, const RecoveryOptions& options, const SecurityOptions* security, bool report_progress, uint32_t threads) {
+    if (options.profile == 5) {
+        if (!security) throw std::runtime_error("Profile 5 requires protected records");
+        create_paged_archive(plan, output, options, *security, report_progress, threads); return;
+    }
     if (security && security->generate_key_file) {
         if (!security->encrypt || !security->password || !security->password->from_key_file) throw KeyFileError();
         if (fs::exists(fs::symlink_status(recovery_key_path(output)))) throw std::runtime_error("Recovery key file already exists");
@@ -269,9 +339,15 @@ void create_configurable_archive(const InputPlan& plan, const fs::path& output, 
     auto& m = a.manifest; File stream(spool);
     timing.packing = elapsed_ns(phase_start); phase_start = TimingClock::now();
     progress.phase("recovery");
+    // Hashes and the manifest MAC have fixed-width encodings. Reserve their
+    // final front envelope once, then append payload directly in final layout.
+    const auto reserved_index = serialize(m).size();
     for (bool parity : {false, true})
-        for (uint32_t v = 0; v < m.volume_count(parity); ++v) { File file(staging.path / (configurable_volume_name(parity, v) + ".tmp"), File::Mode::New); }
-    FileCache payloads(staging.path, File::Mode::Append, ".tmp");
+        for (uint32_t v = 0; v < m.volume_count(parity); ++v) {
+            File file(staging.path / configurable_volume_name(parity, v), File::Mode::New);
+            file.resize(HeaderSize + reserved_index);
+        }
+    FileCache payloads(staging.path, File::Mode::Append, m.volume_count(false) + m.volume_count(true));
     RecoveryLimits recovery_limits{}; size_t peak_jobs = 0;
     {
         RecoveryPool pool(stream, m.stream_size, m.uuid, m.groups, threads, m.profile == 4);
@@ -295,13 +371,19 @@ void create_configurable_archive(const InputPlan& plan, const fs::path& output, 
     payloads.clear(); timing.recovery = elapsed_ns(phase_start); phase_start = TimingClock::now();
     if (keys) sign_manifest(m, *keys);
     a.encoded = serialize(m); a.digest = hash(a.encoded); (void)parse_configurable_manifest(a.encoded);
+    if (a.encoded.size() != reserved_index) throw std::runtime_error("Manifest size changed during volume construction");
     timing.index = elapsed_ns(phase_start); phase_start = TimingClock::now();
     progress.phase("writing");
     timing.volume_workers = write_volumes(staging.path, a, threads);
     fs::remove(spool); write_sidecar(staging.path, a);
     timing.volume_write = elapsed_ns(phase_start); phase_start = TimingClock::now();
     progress.phase("verifying");
-    if (verify_configurable_archive(staging.path).exit_code() != 0) throw std::runtime_error("Created output verification failed");
+    // Reopen the written archive and check the authenticated manifest against
+    // the one we just produced. Reusing its keys avoids a second password KDF
+    // while still verifying every decrypted record before publication.
+    auto written = load(staging.path);
+    if (written.encoded != a.encoded || verify_loaded(written, keys ? &*keys : nullptr, threads).exit_code() != 0)
+        throw std::runtime_error("Created output verification failed");
     timing.verify = elapsed_ns(phase_start); phase_start = TimingClock::now();
     if (security && security->generate_key_file) {
         auto key_file = staging.path / ".recovery-key";
@@ -314,6 +396,7 @@ void create_configurable_archive(const InputPlan& plan, const fs::path& output, 
                                       recovery_limits.workers, peak_jobs, recovery_limits.estimated_bytes);
 }
 ConfigurableManifest list_configurable_archive(const fs::path& directory, const Password* password) {
+    if (uses_paged_profile(directory)) return list_paged_archive(directory, password);
     auto a = load(directory);
     if (a.manifest.profile >= 3 && (!a.manifest.security.encrypted || password)) {
         auto keys = authenticate_manifest(a.manifest, password); StreamReader stream(a);
@@ -328,19 +411,14 @@ ConfigurableManifest list_configurable_archive(const fs::path& directory, const 
     }
     return a.manifest;
 }
-Verification verify_configurable_archive(const fs::path& directory, const Password* password) {
+Verification verify_configurable_archive(const fs::path& directory, const Password* password, ReadProgress* progress) {
+    if (uses_paged_profile(directory)) return verify_paged_archive(directory, password, progress);
     auto a = load(directory);
     auto keys = password ? authenticate_manifest(a.manifest, password) : std::optional<ArchiveKeys>();
-    auto result = scan(a);
-    if (result.exit_code() == 0 && a.manifest.profile >= 3 && (!a.manifest.security.encrypted || password)) {
-        StreamReader stream(a);
-        RecordReader read = [&](uint64_t o, uint32_t n) { return stream.read(o, n); };
-        unlock_index(a.manifest, read, keys ? &*keys : nullptr);
-        verify_private_records(a.manifest, read, keys ? &*keys : nullptr);
-    }
-    return result;
+    return verify_loaded(a, keys ? &*keys : nullptr, 0, progress);
 }
 void repair_configurable_archive(const fs::path& directory, const fs::path& output) {
+    if (uses_paged_profile(directory)) { repair_paged_archive(directory, output); return; }
     auto a = load(directory); require_outside(a.directory, output); Staging staging(output); const auto& m = a.manifest;
     for (bool parity : {false, true}) {
         for (uint32_t v = 0; v < m.volume_count(parity); ++v) {
@@ -348,7 +426,8 @@ void repair_configurable_archive(const fs::path& directory, const fs::path& outp
             file.append(make_header(header_for(a, parity, v), false)); file.append(a.encoded);
         }
     }
-    FileCache input(a.directory, File::Mode::Read), out(staging.path, File::Mode::Append);
+    const auto volume_count = m.volume_count(false) + m.volume_count(true);
+    FileCache input(a.directory, File::Mode::Read, volume_count, 2), out(staging.path, File::Mode::Append, volume_count, 2);
     std::vector<Bytes> blocks; uint64_t data_start = 0, parity_start = 0;
     for (uint32_t i = 0; i < m.groups.size(); ++i) {
         const auto& g = m.groups[i]; auto missing = read_group(a, input, i, data_start, parity_start, blocks);
@@ -371,13 +450,15 @@ void repair_configurable_archive(const fs::path& directory, const fs::path& outp
     if (verify_configurable_archive(staging.path).exit_code() != 0) throw std::runtime_error("Repaired output verification failed");
     staging.commit();
 }
-ExtractionReport extract_configurable_archive(const fs::path& directory, const fs::path& output, const Password* password, bool restore_attributes) {
+ExtractionReport extract_configurable_archive(const fs::path& directory, const fs::path& output, const Password* password, bool restore_attributes, ReadProgress* progress) {
+    if (uses_paged_profile(directory)) return extract_paged_archive(directory, output, password, restore_attributes, progress);
     auto a = load(directory); require_outside(a.directory, output);
     auto keys = authenticate_manifest(a.manifest, password);
-    if (scan(a).bad_data_blocks) throw std::runtime_error("Data blocks are damaged or missing; run repair first");
     StreamReader stream(a); RecordReader read = [&](uint64_t o, uint32_t n) { return stream.read(o, n); };
     unlock_index(a.manifest, read, keys ? &*keys : nullptr);
     Staging staging(output); ExtractionReport report;
+    if (progress) progress->contents("extracting", a.manifest.entries);
+    DecompressionPool pool(a.manifest.uuid, keys ? &*keys : nullptr);
     struct MetadataRollback {
         const fs::path& root; const std::vector<Entry>& entries; bool complete = false;
         ~MetadataRollback() { if (!complete) reset_metadata_for_cleanup(root, entries); }
@@ -389,23 +470,34 @@ ExtractionReport extract_configurable_archive(const fs::path& directory, const f
             fs::permissions(path, fs::perms::owner_all); continue;
         }
         File file(path, File::Mode::New); blake3_hasher digest; blake3_hasher_init(&digest);
+        WipeMemoryOnExit wipe_digest(&digest, sizeof(digest), keys.has_value());
+        auto consume = [&] {
+            auto job = pool.take();
+            file.append(job->plain); blake3_hasher_update(&digest, job->plain.data(), job->plain.size());
+            if (progress) progress->advance(job->plain.size());
+        };
         for (const auto& frame : e.frames) {
-            auto bytes = read_record(a.manifest, read, frame, RecordKind::Content, keys ? &*keys : nullptr);
-            file.append(bytes); blake3_hasher_update(&digest, bytes.data(), bytes.size());
-            if (keys) wipe(bytes);
+            if (pool.full()) consume();
+            auto job = std::make_unique<DecompressionJob>(keys.has_value());
+            job->offset = frame.offset; job->plain_size = frame.plain; job->kind = RecordKind::Content;
+            job->record = read(frame.offset, frame.stored); pool.submit(std::move(job));
         }
+        while (!pool.empty()) consume();
         Digest actual{}; blake3_hasher_finalize(&digest, actual.data(), actual.size());
         if (actual != e.digest) throw std::runtime_error("Extracted file failed BLAKE3 verification: " + e.path);
         file.sync();
+        if (progress) progress->file_completed();
     }
     bool attributes = a.manifest.profile >= 3 && a.manifest.security.metadata && restore_attributes;
     if (attributes) {
+        if (progress) progress->phase("attributes");
         for (auto entry = a.manifest.entries.rbegin(); entry != a.manifest.entries.rend(); ++entry) {
             auto bytes = read_metadata(a.manifest, *entry, read, keys ? &*keys : nullptr);
+            WipeOnExit wipe_metadata(bytes, keys.has_value());
             restore_metadata(staging.path / entry->path, entry->path, entry->directory, bytes, report);
-            if (keys) wipe(bytes);
         }
     }
+    if (progress) progress->phase("publishing");
     staging.commit(attributes); rollback.complete = true; return report;
 }
 }

@@ -3,6 +3,7 @@
 #include "io.hpp"
 #include "compression_pool.hpp"
 #include "protected.hpp"
+#include "read_progress.hpp"
 #include <iostream>
 #include <set>
 #include <optional>
@@ -11,15 +12,15 @@
 namespace {
 void signal_handler(int signal) { rz::interrupted.store(signal, std::memory_order_relaxed); }
 void usage() {
-    std::cout << "rz 0.6.0 — equal-sized recoverable volumes with file metadata\n"
+    std::cout << "rz 0.7.0 — recoverable volumes with protected paginated indexes\n"
         "  rz --capabilities\n"
         "  rz create INPUT_DIRECTORY OUTPUT_SET [OPTIONS]\n"
         "  rz create-selected OUTPUT_SET [OPTIONS] -- INPUT...\n"
         "  rz list SET_DIRECTORY [--json] [--password-stdin]\n"
-        "  rz verify SET_DIRECTORY [--password-stdin]\n"
+        "  rz verify SET_DIRECTORY [--password-stdin] [--progress]\n"
         "  rz repair SET_DIRECTORY NEW_SET_DIRECTORY\n"
-        "  rz extract SET_DIRECTORY NEW_OUTPUT_DIRECTORY [--password-stdin] [--no-attributes] [--json]\n"
-        "OPTIONS: --data-volumes K --recovery-volumes M (profile 4; 1 <= M <= K <= 100)\n"
+        "  rz extract SET_DIRECTORY NEW_OUTPUT_DIRECTORY [--password-stdin] [--no-attributes] [--json] [--progress]\n"
+        "OPTIONS: --data-volumes K --recovery-volumes M (profile 4 or 5; 1 <= M <= K <= 100)\n"
         "         Exactly K+M equal-sized volumes; any M missing volumes are recoverable.\n"
         "LEGACY:  --volume-size 64MiB (1MiB..16GiB, decimal sizes accepted)\n"
         "         --recovery-percent 20 (1..100, up to 2 decimal places)\n"
@@ -29,10 +30,11 @@ void usage() {
         "READ:    --key-file FILE | --auto-key-file (find matching sibling .rzkey by archive ID)\n"
         "         --encryption standard|dual (default standard; dual adds AES-256-GCM)\n"
         "         --no-metadata (omit file attributes; default preserves them)\n"
-        "         --progress (profile 2/3/4 statistics on stderr)\n"
+        "         --progress (create: profile 2/3/4/5; verify/extract: all profiles; stderr)\n"
         "         --threads auto|N (1..64 workers per compression/recovery phase; each capped at 256 MiB)\n"
-        "         --profile 4 (default 10+2 counted volumes); --profile 1|2|3 for legacy layout\n"
-        "Without count options, CLI retains profile 3 for compatibility.\n"
+        "         --profile 5 (10+2 default; paginated protected index; 1 TiB content limit)\n"
+        "         --profile 4 (10+2 default); --profile 1|2|3 for legacy layout\n"
+        "CLI defaults remain profile 3 without counts and profile 4 with counts.\n"
         "Encrypted sets can be repaired without a password.\n"
         "verify without a password checks ciphertext storage only.\n"
         "Exit: 0 success, 2 repairable, 3 unrecoverable, 4 password required/incorrect,\n"
@@ -101,7 +103,7 @@ CreateOptions parse_options(int argc, char** argv, int& position) {
             else out.recovery.recovery_volumes = count;
         }
         else if (flag == "--profile") {
-            if (value != "1" && value != "2" && value != "3" && value != "4") throw std::runtime_error("Unknown profile");
+            if (value != "1" && value != "2" && value != "3" && value != "4" && value != "5") throw std::runtime_error("Unknown profile");
             out.profile = static_cast<uint32_t>(value[0] - '0');
         } else if (flag == "--recovery-percent" || flag == "--recovery-bytes") {
             if (out.custom_recovery) throw std::runtime_error("Choose recovery percent OR recovery bytes");
@@ -113,23 +115,25 @@ CreateOptions parse_options(int argc, char** argv, int& position) {
     if (seen.contains("--data-volumes") != seen.contains("--recovery-volumes"))
         throw std::runtime_error("Specify both --data-volumes and --recovery-volumes");
     if (seen.contains("--data-volumes")) {
-        if (seen.contains("--profile") && out.profile != 4) throw std::runtime_error("Volume counts require profile 4");
-        out.profile = 4;
+        if (seen.contains("--profile") && out.profile != 4 && out.profile != 5)
+            throw std::runtime_error("Volume counts require profile 4 or 5");
+        if (!seen.contains("--profile")) out.profile = 4;
     }
-    if (out.profile == 4) {
+    if (out.profile == 4 || out.profile == 5) {
         if (seen.contains("--volume-size") || out.custom_recovery)
             throw std::runtime_error("Volume counts cannot be combined with size or recovery budget");
         out.recovery.mode = rz::RecoveryMode::Volumes; out.recovery.value = 0; out.recovery.volume_size = 0;
     }
+    out.recovery.profile = out.profile;
     rz::validate_options(out.recovery);
     if (out.generate_key_file && out.password_stdin) throw std::runtime_error("Choose a password OR a generated key file");
     if (out.generate_key_file && !seen.contains("--encryption")) out.crypto_suite = rz::DualCryptoProfile;
     if (seen.contains("--encryption") && !out.encrypt) throw std::runtime_error("Encryption suite requires --encrypt and --password-stdin");
-    if (out.progress && out.profile == 1) throw std::runtime_error("Progress requires profile 2 or 3");
+    if (out.progress && out.profile == 1) throw std::runtime_error("Progress requires profile 2, 3, 4 or 5");
     if (out.profile == 1 && (out.custom_recovery || out.recovery.volume_size > rz::MaxVolume))
         throw std::runtime_error("Legacy profile requires fixed recovery and volume size up to 1 GiB");
     if (out.profile < 3 && (out.encrypt || out.password_stdin || (out.metadata_explicit && out.metadata)))
-        throw std::runtime_error("Encryption and file metadata require profile 3 or 4");
+        throw std::runtime_error("Encryption and file metadata require profile 3, 4 or 5");
     if (out.encrypt != (out.password_stdin || out.generate_key_file)) throw std::runtime_error("Use --encrypt with --password-stdin; never place passwords in arguments");
     return out;
 }
@@ -156,9 +160,14 @@ void json_listing(const std::vector<rz::Entry>& entries, const rz::ConfigurableM
             << ",\"payloadBytes\":" << m->recovery_blocks * rz::BlockSize << ",\"volumeLimitBytes\":" << m->options.volume_size
             << ",\"dataVolumes\":" << m->volume_count(false) << ",\"recoveryVolumes\":" << m->volume_count(true)
             << ",\"requestedMode\":" << static_cast<uint32_t>(m->options.mode) << ",\"requestedValue\":" << m->options.value;
-        if (m->profile == 4)
-            std::cout << ",\"volumeSizeBytes\":" << 2 * rz::HeaderSize + 2 * rz::serialize(*m).size() + m->payload_size(false, 0)
+        if (m->profile == 4 || m->profile == 5) {
+            auto metadata_size = m->profile == 5 ? m->metadata_bytes_per_volume : 2 * rz::HeaderSize + 2 * rz::serialize(*m).size();
+            std::cout << ",\"volumeSizeBytes\":" << metadata_size + m->payload_size(false, 0)
                 << ",\"toleratedVolumeLosses\":" << m->options.recovery_volumes;
+            if (m->profile == 5)
+                std::cout << ",\"metadataBytesPerVolume\":" << metadata_size
+                    << ",\"contentLimitBytes\":" << m->content_limit;
+        }
         std::cout << '}';
     }
     std::cout << ",\"entries\":["; bool first = true;
@@ -170,14 +179,15 @@ void json_listing(const std::vector<rz::Entry>& entries, const rz::ConfigurableM
     }
     std::cout << "]}\n";
 }
-struct ReadOptions { bool json = false, password_stdin = false, attributes = true, auto_key_file = false; rz::fs::path key_file; };
-ReadOptions read_options(int argc, char** argv, int start, bool allow_json, bool allow_attributes, bool automatic = false) {
+struct ReadOptions { bool progress = false, json = false, password_stdin = false, attributes = true, auto_key_file = false; rz::fs::path key_file; };
+ReadOptions read_options(int argc, char** argv, int start, bool allow_json, bool allow_attributes, bool automatic = false, bool allow_progress = false) {
     ReadOptions result; std::set<std::string> seen;
     result.auto_key_file = automatic;
     for (int i = start; i < argc; ++i) {
         std::string flag = argv[i];
         if (!seen.insert(flag).second) throw std::runtime_error("Duplicate option");
-        if (flag == "--json" && allow_json) result.json = true;
+        if (flag == "--progress" && allow_progress) result.progress = true;
+        else if (flag == "--json" && allow_json) result.json = true;
         else if (flag == "--password-stdin") result.password_stdin = true;
         else if (flag == "--auto-key-file") result.auto_key_file = true;
         else if (flag == "--no-auto-key-file") result.auto_key_file = false;
@@ -278,9 +288,12 @@ int main(int argc, char** argv) {
                 }
             }
         } else if (command == "verify" && argc >= 3) {
-            auto options = read_options(argc, argv, 3, false, false);
+            auto options = read_options(argc, argv, 3, false, false, false, true);
+            rz::ReadProgress reporter; auto progress = options.progress ? &reporter : nullptr;
+            if (progress) progress->phase("preparing");
             auto password = read_credential(options, argv[2], true);
-            auto result = rz::uses_configurable_profile(argv[2]) ? rz::verify_configurable_archive(argv[2], password ? &*password : nullptr) : rz::verify_archive(argv[2]);
+            auto result = rz::uses_configurable_profile(argv[2]) ? rz::verify_configurable_archive(argv[2], password ? &*password : nullptr, progress) : rz::verify_archive(argv[2], progress);
+            if (progress && result.exit_code() == 0) progress->phase("completed");
             std::cout << "bad_blocks=" << result.bad_blocks << " bad_data_blocks=" << result.bad_data_blocks
                 << " unrecoverable_stripes=" << result.unrecoverable_stripes << " metadata_issues=" << result.metadata_issues
                 << " password_authentication=" << (options.password_stdin ? "requested" : "not_requested")
@@ -291,11 +304,14 @@ int main(int argc, char** argv) {
             else rz::repair_archive(argv[2], argv[3]);
             std::cout << "Reconstructed and storage-checked " << argv[3] << "; encrypted content authentication requires its password or key file.\n";
         } else if (command == "extract" && argc >= 4) {
-            auto options = read_options(argc, argv, 4, true, true, true);
+            auto options = read_options(argc, argv, 4, true, true, true, true);
+            rz::ReadProgress reporter; auto progress = options.progress ? &reporter : nullptr;
+            if (progress) progress->phase("preparing");
             auto password = read_credential(options, argv[2], true);
             rz::ExtractionReport report;
-            if (rz::uses_configurable_profile(argv[2])) report = rz::extract_configurable_archive(argv[2], argv[3], password ? &*password : nullptr, options.attributes);
-            else rz::extract_archive(argv[2], argv[3]);
+            if (rz::uses_configurable_profile(argv[2])) report = rz::extract_configurable_archive(argv[2], argv[3], password ? &*password : nullptr, options.attributes, progress);
+            else rz::extract_archive(argv[2], argv[3], progress);
+            if (progress) progress->phase("completed");
             if (options.json) {
                 std::cout << "{\"outputPublished\":true,\"warningCount\":" << report.warning_count << ",\"metadataWarnings\":[";
                 for (size_t i = 0; i < report.warnings.size(); ++i) { if (i) std::cout << ','; json_string(report.warnings[i]); }

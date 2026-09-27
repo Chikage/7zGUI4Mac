@@ -195,6 +195,19 @@ class ConfigurableTest(unittest.TestCase):
         run('extract', broken, self.work / 'extracted')
         self.assertEqual(tree(self.work / 'extracted'), self.expected)
 
+    def test_late_data_damage_does_not_publish_partial_extraction(self):
+        broken = self.damaged(); info = layout(broken)
+        last = len(info[3]) - 1
+        path, offset = cell(broken, info, last, info[3][last][0] - 1)
+        flip(path, offset)
+        result = run('verify', broken, code=2)
+        self.assertIn('bad_blocks=1 bad_data_blocks=1 unrecoverable_stripes=0', result.stdout)
+        output = self.work / 'failed'
+        result = run('extract', broken, output, code=1)
+        self.assertIn('run repair first', result.stderr)
+        self.assertFalse(output.exists())
+        self.assertFalse(list(self.work.glob('.rz-stage-*')))
+
     def test_mixed_archive_and_symlink_rejected(self):
         other = self.work / 'other'
         run('create', self.src, other, '--volume-size', '1MiB')

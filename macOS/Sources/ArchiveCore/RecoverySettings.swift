@@ -120,13 +120,15 @@ public struct RecoveryDetails: Decodable, Sendable {
     public let requestedValue: Int64
     public let volumeSizeBytes: Int64?
     public let toleratedVolumeLosses: Int?
+    public let metadataBytesPerVolume: Int64?
+    public let contentLimitBytes: Int64?
     public var actualRatio: Double { Double(payloadBytes) / Double(dataBytes) }
+    public var hasCountedVolumes: Bool { profile == 4 || profile == 5 }
 
     var isValid: Bool {
-        if profile == 4 {
+        if hasCountedVolumes {
             guard (1...100).contains(dataVolumes), (1...dataVolumes).contains(recoveryVolumes),
                 dataBytes >= 65_536, payloadBytes >= 65_536, payloadBytes <= dataBytes,
-                dataBytes <= 70 * 1024 * 1024 * 1024,
                 dataBytes % (Int64(dataVolumes) * 65_536) == 0,
                 payloadBytes % (Int64(recoveryVolumes) * 65_536) == 0,
                 dataBytes / Int64(dataVolumes) == payloadBytes / Int64(recoveryVolumes),
@@ -134,7 +136,28 @@ public struct RecoveryDetails: Decodable, Sendable {
                 toleratedVolumeLosses == recoveryVolumes, let volumeSizeBytes
             else { return false }
             let payload = dataBytes / Int64(dataVolumes)
-            return volumeSizeBytes > payload + 240 && volumeSizeBytes <= payload + 240 + 2 * 16 * 1024 * 1024
+            if profile == 4 {
+                return dataBytes <= 70 * 1024 * 1024 * 1024
+                    && volumeSizeBytes > payload + 240 && volumeSizeBytes <= payload + 240 + 2 * 16 * 1024 * 1024
+            }
+            let contentLimit: Int64 = 1024 * 1024 * 1024 * 1024
+            let stripeBytes = Int64(dataVolumes) * 65_536
+            guard contentLimitBytes == contentLimit,
+                dataBytes <= contentLimit + contentLimit / 100 + stripeBytes,
+                let metadataBytesPerVolume
+            else { return false }
+            let stripes = payload / 65_536
+            let hashBytes = stripes * Int64(dataVolumes + recoveryVolumes) * 32
+            let hashPages = (hashBytes + 65_535) / 65_536
+            let rootSize = 44 + hashPages * 32
+            let indexRecords = (hashPages * 65_536 + rootSize + stripeBytes - 1) / stripeBytes
+            let recordOverhead = 240 + 32 * stripes + 65_568 * indexRecords
+            let (bootstrapCopies, overflow) = metadataBytesPerVolume.subtractingReportingOverflow(recordOverhead)
+            let minimumBootstrap = 148 + Int64(dataVolumes + recoveryVolumes) * 32
+            guard !overflow, (2 * minimumBootstrap...16_384).contains(bootstrapCopies), bootstrapCopies % 2 == 0 else {
+                return false
+            }
+            return volumeSizeBytes == payload + metadataBytesPerVolume
         }
         return (profile == 2 || profile == 3) && dataBytes >= 65_536 && payloadBytes >= 65_536
             && payloadBytes <= dataBytes

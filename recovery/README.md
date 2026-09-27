@@ -2,8 +2,9 @@
 
 独立命令行后端 `rz`，使用 libzstd、BLAKE3 和 Jerasure/GF-Complete。
 支持创建分卷、列目录、逐块验证、外置恢复卷修复、完整解压。
-GUI 新建使用实验格式 `RZ profile 4` 等大分卷，兼容读取旧版 `profile 1/2/3`。
-CLI 指定卷数或 `--profile 4` 使用新布局；不带卷数参数仍默认 profile 3，保留已有脚本行为。
+GUI 新建使用实验格式 `RZ profile 5`：等大分卷、分页摘要与受恢复码保护的索引区，内容上限 1 TiB。
+兼容读取旧版 `profile 1/2/3/4`。CLI 显式 `--profile 5` 使用新格式；仅指定卷数仍为 profile 4，
+不带卷数参数仍默认 profile 3，保留已有脚本行为。详见 [Profile 5 规范](docs/FORMAT-V5.md)。
 该格式不兼容 RAR、7z 或 PAR2。
 macOS GUI 的“新建压缩包 → 可恢复 RZ”已接入此后端，提供创建、浏览、测试、修复和解压。
 
@@ -43,7 +44,7 @@ TSAN_OPTIONS=halt_on_error=1 ctest --test-dir recovery/build-tsan --output-on-fa
 构建标量版本，或通过 `GF_COMPLETE_DISABLE_NEON=1` 在运行时选择标量路径。
 两者使用同一磁盘格式，测试会对照独立 GF 算术实现并验证跨后端恢复。
 
-## 密码加密与文件属性（profile 3/4）
+## 密码加密与文件属性（profile 3/4/5）
 
 - 支持独立密钥文件：`--generate-key-file` 自动创建同目录 `.rzkey`，默认使用双层 AES 加密；
   list/extract 自动匹配同目录密钥，也可 `--key-file FILE` 手动指定。GUI 默认使用该模式，
@@ -59,7 +60,18 @@ TSAN_OPTIONS=halt_on_error=1 ctest --test-dir recovery/build-tsan --output-on-fa
 - 所有者、特殊权限和受保护的系统属性按明确政策处理，无法还原时报告；内容成功解压不会因属性警告被丢弃。
 - 详细字段、恢复政策和安全边界见 [FORMAT-V3](docs/FORMAT-V3.md)。属性单条目限 64 MiB，私有索引限 16 MiB。
 
-## 按数据卷与恢复卷数量创建（profile 4）
+## 分页索引与 1 TiB 内容上限（profile 5）
+
+```sh
+recovery/build/rz create input archive.rz --profile 5 --data-volumes 10 --recovery-volumes 2
+```
+
+每卷首尾和 sidecar 复制至多 8 KiB 启动元数据；64 KiB 摘要页、根表和索引恢复块受到 RS 保护。
+最多 1 TiB 原始内容与属性、100,000 个条目；私有目录索引仍限 16 MiB。保留两种加密与密钥文件模式。
+启动元数据认证索引根和每卷索引区整体摘要，完整验证也能发现局部摘要被同时改写的索引破坏。
+小归档会增加一个索引条带的填充开销。新格式不能由旧程序读取；旧归档无需转换。
+
+## 按数据卷与恢复卷数量创建（profile 4，保留兼容）
 
 - `--data-volumes K --recovery-volumes M`：1 ≤ M ≤ K ≤ 100；`--profile 4` 默认 10+2。
 - 恰好 K+M 个卷，所有卷最终文件大小相同；压缩/加密后按 64 KiB 块组成 K+M 条带并补齐尾部。
@@ -119,8 +131,10 @@ recovery/build/rz create /path/to/input /path/to/archive.rz --threads 4
 一起计入预算，并按组号顺序写入分卷。线程数也受实际编码组数量限制，小归档不会启动空闲 worker。
 保留现有 Cauchy 矩阵、GF(256)/0x11d、块摘要域和物理布局，旧版解码器可读取和修复新归档。
 
-属性捕获/压缩、加密提交、分卷写入、封装和复验仍串行；profile 1 的恢复码生成以及所有 profile
-的修复仍使用串行 Jerasure。普通异常或取消会停止派发任务，并在编码行边界停止其他 worker。
+属性捕获/压缩与加密提交仍串行。profile 2–5 直接写入最终暂存卷，避免临时载荷到最终卷的整卷复制；
+卷文件缓存依据系统文件句柄限额分配。完整存储扫描最多 4 路顺序 IO，内容认证/解压使用有界并行池，
+每个 worker 复用独立 Zstd 解压上下文；普通提取仅验证实际读取的块。创建后的加密复验使用已有密钥
+完整认证和解压内容，不重复密码派生。profile 1 的恢复码生成以及所有 profile 的修复仍使用串行 Jerasure。普通异常或取消会停止派发任务，并在编码行边界停止其他 worker。
 实际加速取决于这些阶段占比及磁盘吞吐，不承诺随核心数线性提升。
 
 ### 阶段统计与性能对照
@@ -133,8 +147,8 @@ profile 2/3/4 使用 `--progress` 时，成功创建后还会向 stderr 输出�
 - `recovery_wall_us`：恢复阶段实际耗时，包含上下文初始化、组任务和载荷写入。
 - `read_work_us`、`rs_work_us`、`hash_work_us`：各 worker 的读取/分配、RS 运算、块摘要耗时之和；
   它们与写入可以重叠，不可相加当成实际耗时或 CPU 使用时间。
-- `payload_write_us`：按序写入临时分卷载荷；`index_us`：最终索引认证/序列化；
-  `volume_write_us`：最终分卷封装与同步；`verify_us`：存储复验；`publish_us`：原子发布；`total_us`：创建总耗时。
+- `payload_write_us`：按序写入暂存卷载荷；`index_us`：最终索引认证/序列化；
+  `volume_write_us`：最终分卷封装与同步；`verify_us`：完整内容复验（加密创建也包含认证解密）；`publish_us`：原子发布；`total_us`：创建总耗时。
 - `recovery_workers`、`recovery_peak_jobs`、`recovery_estimated_bytes`：恢复线程数、最多在途组数和预算估计。
 
 可复现的本地对照脚本（128 MiB 日志/随机数据，1%/20%/100% 恢复比例，三次取中位数）：
@@ -218,10 +232,11 @@ archive/
   拒绝符号链接、设备、FIFO 和危险路径；硬链接作为独立文件保存，稀疏布局不保留。
 - 不支持数字签名、内嵌恢复记录、追加恢复卷、增量更新、单文件提取或重命名卷自动发现。
   BLAKE3 存储校验不代替密码认证；加密使用独立 AEAD 和 keyed BLAKE3 索引认证。
-- 上限：原始内容与属性合计 64 GiB、100,000 个条目；公开/私有索引各限 16 MiB。profile 2/3 每种物理卷最多 65,536 个，profile 4 最多 100+100 个等大卷；profile 1 另限 4,096 个编码组。
+- profile 1–4 上限：原始内容与属性合计 64 GiB、100,000 个条目；公开/私有索引各限 16 MiB。profile 2/3 每种物理卷最多 65,536 个，profile 4 最多 100+100 个等大卷；profile 1 另限 4,096 个编码组。
   实际先到达哪项就受哪项限制。重复完整索引会限制大规模扩展，小卷装不下索引时会提示增大卷尺寸。
 - 源目录在创建过程中应保持不变；首版没有文件系统快照语义。
-- 临时空间包含压缩流、数据载荷和恢复载荷，再加分卷写入重叠与索引开销（profile 4 最多同时封装 4 卷）；恢复载荷越大，占用越多。
+- profile 2–5 临时空间包含压缩流及直接写入的最终暂存卷；profile 5 另有分页摘要临时流。
+  不再复制整套临时分卷载荷；仍需预留恢复载荷和索引空间。
   内存按 frame / 条带处理，不加载整个归档；索引目前驻留内存。
 - 写入先进入同一父目录下的私有 `.rz-stage-*`，文件和目录同步后以禁止覆盖的 rename 发布。
   普通失败和 SIGINT/SIGTERM 会清理；SIGKILL、断电可能留下未提交临时目录。
@@ -231,6 +246,7 @@ archive/
 
 ## 验证与实现入口
 
+- [分页摘要与受保护索引 profile 5](docs/FORMAT-V5.md)
 - [可配置格式 profile 2](docs/FORMAT-V2.md)
 - [等大 K+M 分卷 profile 4](docs/FORMAT-V4.md)
 - [加密与元数据 profile 3](docs/FORMAT-V3.md)
@@ -250,3 +266,16 @@ archive/
 
 自有代码沿用仓库根目录 LGPL-3.0 许可证。第三方代码保留各自许可证；
 分发可执行文件时须一并提供相关声明和满足 LGPL 的对应源码要求。
+
+### 解压和校验进度
+
+`rz verify SET --progress` 与 `rz extract SET OUTPUT --json --progress` 支持全部 profile。
+进度写入 stderr，stdout 继续只包含原有结果（包括提取属性警告的 JSON）。默认不输出进度。
+每条记录为制表符分隔的
+`RZREADPROGRESS1 phase processed_bytes total_bytes completed_files total_files elapsed_ms`。
+阶段为 `preparing`、`storage`、`checking`、`extracting`、`attributes`、`publishing`、`completed`。
+`storage` 统计已检查的卷载荷块（profile 5 包括分页索引记录），文件计数为 0；
+`checking` / `extracting` 统计原始文件字节及非目录文件数，包括空文件。
+每个可计量阶段重新计时和计数；属性恢复与发布阶段保留内容统计，不提供耗时百分比。
+只在成功完成（或内容成功、属性有警告）时发送 `completed`；失败或取消不发送。
+记录不含文件路径或凭据；多线程校验的更新串行化并按 200 ms 限流，阶段边界与首次处理即时发送。

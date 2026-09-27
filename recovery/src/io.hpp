@@ -10,7 +10,7 @@ extern std::atomic<sig_atomic_t> interrupted;
 void check_cancel();
 class File {
 public:
-    enum class Mode { Read, New, Append };
+    enum class Mode { Read, New, Append, Update };
     explicit File(const fs::path& path, Mode mode = Mode::Read, bool optional = false);
     ~File();
     File(const File&) = delete;
@@ -20,6 +20,9 @@ public:
     bool read(uint64_t offset, void* data, size_t size) const;
     void append(const void* data, size_t size);
     void append(const Bytes& b) { append(b.data(), b.size()); }
+    void write(uint64_t offset, const void* data, size_t size);
+    void write(uint64_t offset, const Bytes& b) { write(offset, b.data(), b.size()); }
+    void resize(uint64_t size);
     void sync();
 private:
     int fd_ = -1;

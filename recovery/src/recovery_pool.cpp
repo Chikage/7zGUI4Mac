@@ -8,10 +8,14 @@
 
 namespace rz {
 struct RecoveryPool::Impl {
-    Impl(const File& source, uint64_t size, const UUID& uuid, std::span<const CodingGroup> groups, uint32_t requested, bool striped)
-        : source(source), stream_size(size), uuid(uuid), groups(groups) {
-        if (requested > 64 || groups.empty() || size > MaxOutput + MaxOutput / 100)
+    Impl(const File& source, uint64_t size, const UUID& uuid, std::span<const CodingGroup> groups, uint32_t requested, bool striped,
+         uint32_t uniform_k = 0, uint32_t uniform_m = 0)
+        : source(source), stream_size(size), uuid(uuid), groups(groups), uniform_k(uniform_k), uniform_m(uniform_m) {
+        const auto max_output = uniform_k ? MaxPagedOutput : MaxOutput;
+        if (requested > 64 || (!uniform_k && groups.empty()) || size > max_output + max_output / 100 ||
+            (uniform_k && (uniform_k > 100 || uniform_m < 1 || uniform_m > uniform_k)))
             throw std::runtime_error("Invalid recovery pool configuration");
+        group_count = uniform_k ? std::max<uint64_t>(1, (size + uint64_t(uniform_k) * BlockSize - 1) / (uint64_t(uniform_k) * BlockSize)) : groups.size();
         uint64_t data_blocks = 0; size_t max_shards = 0;
         for (size_t i = 0; i < groups.size(); ++i) {
             const auto& g = groups[i];
@@ -21,8 +25,10 @@ struct RecoveryPool::Impl {
                 throw std::runtime_error("Invalid recovery pool geometry");
             data_blocks += g.k; max_shards = std::max(max_shards, size_t(g.k + g.m));
         }
+        if (uniform_k) { data_blocks = group_count * uniform_k; max_shards = uniform_k + uniform_m; }
         const auto real_blocks = std::max<uint64_t>(1, size / BlockSize + (size % BlockSize != 0));
-        const auto expected_blocks = striped ? ((real_blocks + groups.front().k - 1) / groups.front().k) * groups.front().k : real_blocks;
+        const auto width = uniform_k ? uniform_k : groups.front().k;
+        const auto expected_blocks = striped ? ((real_blocks + width - 1) / width) * width : real_blocks;
         if (data_blocks != expected_blocks)
             throw std::runtime_error("Recovery groups do not cover the stream");
         // Own/size one context before choosing the pool size. Initialize the rest
@@ -37,11 +43,11 @@ struct RecoveryPool::Impl {
         // Narrow stripes use less memory, but tiny archives should not start a
         // worker for every stripe. Amortize automatic workers over 1 MiB of work.
         if (striped && !requested) {
-            const auto work_bytes = uint64_t(groups.size()) * max_shards * BlockSize;
+            const auto work_bytes = uint64_t(group_count) * max_shards * BlockSize;
             desired = static_cast<uint32_t>(std::min<uint64_t>(desired, (work_bytes + 1024 * 1024 - 1) / (1024 * 1024)));
         }
-        limits.workers = std::min({size_t(desired), size_t(64), available, groups.size()});
-        limits.slots = std::min(groups.size(), limits.workers * 2);
+        limits.workers = std::min({size_t(desired), size_t(64), available, group_count});
+        limits.slots = std::min(group_count, limits.workers * 2);
         limits.estimated_bytes = overhead + context_bytes * limits.workers + group_bytes * limits.slots;
         while (encoders.size() < limits.workers) encoders.push_back(std::make_unique<RecoveryEncoder>());
         workers.reserve(limits.workers);
@@ -99,6 +105,8 @@ struct RecoveryPool::Impl {
     const uint64_t stream_size;
     const UUID uuid;
     const std::span<const CodingGroup> groups;
+    const uint32_t uniform_k, uniform_m;
+    size_t group_count = 0;
     RecoveryLimits limits{};
     size_t submitted = 0, peak = 0;
     uint64_t data_start = 0, parity_start = 0;
@@ -120,6 +128,11 @@ RecoveryPool::RecoveryPool(const File& source, uint64_t size, const UUID& uuid,
         impl_->workers.emplace_back([state = impl_.get(), i] { state->run(i); });
 }
 RecoveryPool::~RecoveryPool() = default;
+RecoveryPool::RecoveryPool(const File& source, uint64_t size, const UUID& uuid, uint32_t k, uint32_t m, uint32_t threads)
+    : impl_(std::make_unique<Impl>(source, size, uuid, std::span<const CodingGroup>{}, threads, true, k, m)) {
+    for (size_t i = 0; i < impl_->limits.workers; ++i)
+        impl_->workers.emplace_back([state = impl_.get(), i] { state->run(i); });
+}
 bool RecoveryPool::empty() const { return impl_->ordered.empty(); }
 bool RecoveryPool::full() const { return impl_->ordered.size() == impl_->limits.slots; }
 const RecoveryLimits& RecoveryPool::limits() const { return impl_->limits; }
@@ -128,13 +141,14 @@ void RecoveryPool::submit_next() {
     check_cancel(); auto& state = *impl_;
     std::lock_guard lock(state.mutex);
     if (state.error) std::rethrow_exception(state.error);
-    if (full() || state.submitted == state.groups.size()) throw std::runtime_error("Recovery queue admission exceeded");
-    const auto& g = state.groups[state.submitted];
+    if (full() || state.submitted == state.group_count) throw std::runtime_error("Recovery queue admission exceeded");
+    const auto k = state.uniform_k ? state.uniform_k : state.groups[state.submitted].k;
+    const auto m = state.uniform_k ? state.uniform_m : state.groups[state.submitted].m;
     auto job = std::make_unique<RecoveryJob>();
-    job->index = static_cast<uint32_t>(state.submitted); job->k = g.k; job->m = g.m;
+    job->index = static_cast<uint32_t>(state.submitted); job->k = k; job->m = m;
     job->data_start = state.data_start; job->parity_start = state.parity_start;
     state.ordered.push_back(std::move(job)); state.work.push_back(state.ordered.back().get());
-    ++state.submitted; state.data_start += g.k; state.parity_start += g.m;
+    ++state.submitted; state.data_start += k; state.parity_start += m;
     state.peak = std::max(state.peak, state.ordered.size());
     state.changed.notify_all();
 }

@@ -27,5 +27,5 @@ struct Reader {
     void end() { if (p != b.size()) throw std::runtime_error("Trailing metadata bytes"); }
 };
 void write_entries(Writer& writer, const std::vector<Entry>& entries);
-std::vector<Entry> read_entries(Reader& reader, uint64_t stream_size, uint64_t initial_offset = 0);
+std::vector<Entry> read_entries(Reader& reader, uint64_t stream_size, uint64_t initial_offset = 0, uint64_t max_output = MaxOutput);
 }

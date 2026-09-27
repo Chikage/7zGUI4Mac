@@ -147,7 +147,10 @@ class ParallelRecoveryTest(unittest.TestCase):
                 while time.monotonic() < deadline and process.poll() is None:
                     for stage in self.work.glob('.rz-stage-*'):
                         try:
-                            if any(path.stat().st_size > 0 for path in stage.glob('*.rzv.tmp')): active = True
+                            # Payload now goes straight into final-name staged
+                            # volumes. The reserved front index is at most 16 MiB,
+                            # so crossing that bound proves payload was written.
+                            if any(path.stat().st_size > 16 * 1024 * 1024 + 120 for path in stage.glob('*.rzv')): active = True
                         except FileNotFoundError: pass
                     if active: break
                     time.sleep(0.005)
@@ -156,7 +159,8 @@ class ParallelRecoveryTest(unittest.TestCase):
                 self.assertEqual(process.returncode, 1); self.assertIn('cancelled', error)
                 self.assertFalse(output.exists()); self.assertFalse(list(self.work.glob('.rz-stage-*')))
             finally:
-                if process.poll() is None: process.kill(); process.communicate()
+                if process.poll() is None: process.kill()
+                process.communicate()
 
 
 if __name__ == '__main__': unittest.main()

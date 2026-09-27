@@ -197,18 +197,34 @@ class CountedVolumesTest(unittest.TestCase):
         def limit(): resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
         archive = self.work / 'wide'
         run('create', self.source, archive, '--data-volumes', 32, '--recovery-volumes', 16, '--threads', 4, preexec_fn=limit)
+        run('verify', archive, preexec_fn=limit)
         for file in sorted(archive.glob('*.rzv'))[:16]: file.unlink()
         run('repair', archive, self.work / 'wide-fixed', preexec_fn=limit)
         run('extract', self.work / 'wide-fixed', self.work / 'wide-out', preexec_fn=limit)
         self.assertEqual((self.work / 'wide-out' / 'data').read_bytes(), self.data)
+
+    def test_extraction_checks_content_without_scanning_unused_padding(self):
+        source = self.work / 'small'; source.mkdir(); (source / 'one').write_bytes(b'x')
+        archive = self.work / 'padded'
+        run('create', source, archive, '--data-volumes', 4, '--recovery-volumes', 2, '--no-metadata')
+        raw, _, _, stripes, stream = layout(archive)
+        self.assertEqual(stripes, 1); self.assertLess(stream, BLOCK)
+        # These shards contain only padding/parity. Content extraction can use
+        # the intact first data block, while full verification must report both.
+        flip(archive / 'd000003.rzv', HEADER + len(raw))
+        flip(archive / 'p000000.rzr', HEADER + len(raw))
+        result = run('verify', archive, code=2)
+        self.assertIn('bad_blocks=2 bad_data_blocks=1 unrecoverable_stripes=0', result.stdout)
+        run('extract', archive, self.work / 'out')
+        self.assertEqual((self.work / 'out' / 'one').read_bytes(), b'x')
 
     def test_parallel_finalization_failure_cleans_staging(self):
         reference = self.work / 'reference'
         run('create', self.source, reference, '--data-volumes', 1, '--recovery-volumes', 1,
             '--no-metadata', '--threads', 4)
         raw, _, _, stripes, _ = layout(reference)
-        # The spool and temporary payload fit; final volumes include two indexes
-        # and must fail during their concurrent envelope writes.
+        # The spool fits. Final-layout staged volumes include two indexes and
+        # must fail while appending payload or finalizing their envelopes.
         limit = stripes * BLOCK + 100
         self.assertLess(limit, 2 * HEADER + 2 * len(raw) + stripes * BLOCK)
         def constrain():

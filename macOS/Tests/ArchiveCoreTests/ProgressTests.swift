@@ -115,3 +115,125 @@ func compressionReportsRealTotalsAndCompletion(format: ArchiveFormat) async thro
         #expect(metrics.compressedBytes == size.map(Int64.init))
     }
 }
+
+@Test(arguments: [ArchiveReadOperation.extract, .verify])
+func sevenZipReadProgressUsesListingTotals(operation: ArchiveReadOperation) throws {
+    var parser = EngineProgressParser(
+        readOperation: operation, totals: ProcessingMetrics(totalBytes: 1000, totalFiles: 4))
+    #expect(parser.start(now: 10)?.fraction == 0)
+    let update = try #require(parser.consume(Data(" 25% 2 - file.txt\r".utf8), now: 12).last)
+    #expect(update.processing?.processedBytes == 250)
+    #expect(update.processing?.completedFiles == 2)
+    #expect(update.processing?.bytesPerSecond == 125)
+    #expect(update.processing?.isEstimated == true)
+    #expect(update.compression == nil)
+    let finalUpdate = parser.finish(now: 14)
+    let done = try #require(finalUpdate)
+    #expect(done.fraction == 1)
+    #expect(done.processing?.completedFiles == 4)
+    #expect(done.processing?.processedBytes == 1000)
+    #expect(done.processing?.isEstimated == false)
+}
+
+@Test func recoveryReadProgressHandlesPhasesAndSplitRecords() throws {
+    var parser = EngineProgressParser(readOperation: .extract)
+    #expect(parser.consume(Data("RZREADPROGRESS1\tstorage\t50\t".utf8)).isEmpty)
+    let storage = try #require(parser.consume(Data("100\t0\t0\t1000\n".utf8)).last)
+    #expect(storage.fraction == 0.5)
+    #expect(storage.processing?.totalFiles == nil)
+    #expect(storage.processing?.bytesPerSecond == 50)
+    let extracted = try #require(parser.consume(Data("RZREADPROGRESS1\textracting\t100\t100\t2\t2\t2000\n".utf8)).last)
+    #expect(extracted.fraction == 0.99)
+    #expect(extracted.processing?.completedFiles == 2)
+    let attributes = try #require(parser.consume(Data("RZREADPROGRESS1\tattributes\t100\t100\t2\t2\t2000\n".utf8)).last)
+    #expect(attributes.fraction == nil)
+    #expect(attributes.message.contains("恢复属性"))
+    #expect(attributes.processing?.processedBytes == 100)
+    // A process exiting without a completion record must not invent success.
+    #expect(parser.finish() == nil)
+    let done = try #require(parser.consume(Data("RZREADPROGRESS1\tcompleted\t100\t100\t2\t2\t2000\n".utf8)).last)
+    #expect(done.fraction == 1)
+    #expect(done.compression == nil)
+    for line in [
+        "RZREADPROGRESS1\tchecking\t101\t100\t0\t2\t10\n",
+        "RZREADPROGRESS1\tchecking\t10\t100\t3\t2\t10\n",
+        "RZREADPROGRESS1\tchecking\t-1\t100\t0\t2\t10\n",
+        "RZREADPROGRESS1\tunknown\t10\t100\t0\t2\t10\n",
+    ] {
+        #expect(parser.consume(Data(line.utf8)).isEmpty)
+    }
+}
+
+@Test func processStreamsProgressAlongsideJSONAndWarnings() async throws {
+    let log = ProgressRecorder()
+    let start = ContinuousClock.now
+    let result = try await ProcessRunner(executable: URL(fileURLWithPath: "/bin/sh")).run(
+        arguments: [
+            "-c",
+            "printf 'RZREADPROGRESS1\\textracting\\t50\\t100\\t1\\t2\\t1000\\n' >&2; sleep 2; printf '{\"warningCount\":1}'; exit 5",
+        ],
+        captureListing: true, readOperation: .extract, progress: { log.append($0) })
+    #expect(result.status == 5)
+    #expect(result.output == "{\"warningCount\":1}")
+    let update = try #require(log.snapshots.first)
+    #expect(update.fraction == 0.5)
+    #expect(start.duration(to: update.timestamp) < .seconds(1.5))
+    #expect(!log.snapshots.contains { $0.fraction == 1 })
+}
+
+@Test func processDrainsBothPipesAndPreservesErrors() async throws {
+    let result = try await ProcessRunner(executable: URL(fileURLWithPath: "/bin/sh")).run(
+        arguments: [
+            "-c",
+            "i=0; while [ $i -lt 5000 ]; do printf 'RZREADPROGRESS1\\tstorage\\t0\\t100\\t0\\t0\\t0\\n' >&2; i=$((i+1)); done; printf '{}'; printf 'run repair first\\n' >&2; exit 1",
+        ],
+        captureListing: true)
+    #expect(result.status == 1)
+    #expect(result.output.contains("run repair first"))
+    #expect(result.output.hasPrefix("{}"))
+}
+
+@Test(arguments: ArchiveFormat.allCases)
+func readOperationsReportTotalsAndCompletion(format: ArchiveFormat) async throws {
+    let fixture = try Fixture()
+    defer { fixture.cleanup() }
+    let source = try fixture.file("source/data.txt", contents: String(repeating: "Read progress! ", count: 500_000))
+    _ = try fixture.file("source/empty.txt", contents: "")
+    let archive = fixture.root.appendingPathComponent("output.\(format.rawValue)")
+    _ = try await fixture.service.compress(
+        [source.deletingLastPathComponent()], to: archive, options: CompressionOptions(format: format))
+    for operation in [ArchiveReadOperation.extract, .verify] {
+        let log = ProgressRecorder()
+        if operation == .extract {
+            let output = fixture.root.appendingPathComponent("extracted")
+            _ = try await fixture.service.extract(archive, to: output, progress: { log.append($0) })
+            #expect(try Data(contentsOf: output.appendingPathComponent("source/data.txt")) == Data(contentsOf: source))
+        } else {
+            try await fixture.service.test(archive, progress: { log.append($0) })
+        }
+        let final = try #require(log.snapshots.last { $0.processing != nil })
+        let metrics = try #require(final.processing)
+        #expect(final.fraction == 1)
+        #expect(metrics.totalBytes == 7_500_000 && metrics.processedBytes == metrics.totalBytes)
+        #expect(metrics.totalFiles == 2 && metrics.completedFiles == 2)
+        #expect(!metrics.isEstimated)
+        #expect(log.snapshots.contains { $0.fraction == 0 })
+        #expect(log.snapshots.allSatisfy { $0.compression == nil })
+    }
+}
+
+@Test(arguments: [ArchiveFormat.sevenZip, .recovery])
+func emptyFilesCompleteReadProgress(format: ArchiveFormat) async throws {
+    let fixture = try Fixture()
+    defer { fixture.cleanup() }
+    let source = try fixture.file("empty.txt", contents: "")
+    let archive = fixture.root.appendingPathComponent("empty.\(format.rawValue)")
+    _ = try await fixture.service.compress([source], to: archive, options: CompressionOptions(format: format))
+    let log = ProgressRecorder()
+    try await fixture.service.test(archive, progress: { log.append($0) })
+    let final = try #require(log.snapshots.last)
+    #expect(final.fraction == 1)
+    #expect(final.processing?.totalBytes == 0)
+    #expect(final.processing?.completedFiles == 1)
+    #expect(final.processing?.bytesPerSecond == nil || final.processing?.bytesPerSecond == 0)
+}

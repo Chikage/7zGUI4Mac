@@ -24,6 +24,9 @@ class RecoveryPool {
 public:
     RecoveryPool(const File& source, uint64_t stream_size, const UUID& uuid,
                  std::span<const CodingGroup> groups, uint32_t threads = 0, bool striped = false);
+    // Uniform profile 5 geometry is generated on demand, never an archive-sized array.
+    RecoveryPool(const File& source, uint64_t stream_size, const UUID& uuid,
+                 uint32_t k, uint32_t m, uint32_t threads = 0);
     ~RecoveryPool();
     RecoveryPool(const RecoveryPool&) = delete;
     RecoveryPool& operator=(const RecoveryPool&) = delete;

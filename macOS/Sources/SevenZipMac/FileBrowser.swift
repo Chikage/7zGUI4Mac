@@ -59,6 +59,7 @@ struct FileBrowser: View {
                     ) { ids in
                         contextMenu(ids)
                     }
+                    .disabled(files.isLoading || files.isMutating)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

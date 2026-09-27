@@ -1,5 +1,5 @@
 #pragma once
-#include "codec.hpp"
+#include "format.hpp"
 #include <memory>
 #include <stdexcept>
 #include <filesystem>
@@ -50,7 +50,7 @@ struct KeySlot {
 };
 class ArchiveKeys {
 public:
-    explicit ArchiveKeys(const unsigned char* master, uint32_t suite = CryptoProfile, bool writable = true);
+    explicit ArchiveKeys(const unsigned char* master, uint32_t suite = CryptoProfile, bool writable = true, uint64_t max_output = MaxOutput);
     Bytes seal(const UUID& uuid, RecordKind kind, uint64_t offset, uint32_t plain_size, const Bytes& compressed);
     Bytes open(const UUID& uuid, RecordKind kind, uint64_t offset, uint32_t plain_size, const Bytes& record) const;
     Digest manifest_mac(const Bytes& manifest_with_zero_mac) const;
@@ -58,20 +58,33 @@ private:
     SecretBytes keys_{224};
     uint32_t suite_;
     bool writable_;
+    uint64_t max_record_offset_;
     uint64_t next_offset_ = 0;
 };
-ArchiveKeys create_keys(const UUID& uuid, const Password& password, KeySlot& slot);
+ArchiveKeys create_keys(const UUID& uuid, const Password& password, KeySlot& slot, uint64_t max_output = MaxOutput);
 ArchiveKeys unlock_keys(const UUID& uuid, const Password& password, const KeySlot& slot);
 bool secure_equal(const Digest& a, const Digest& b);
-void wipe(Bytes& bytes);
+void wipe(void* data, size_t size) noexcept;
+void wipe(Bytes& bytes) noexcept;
 class WipeOnExit {
 public:
     explicit WipeOnExit(Bytes& bytes, bool enabled = true) : bytes_(bytes), enabled_(enabled) {}
     ~WipeOnExit() { if (enabled_) wipe(bytes_); }
     WipeOnExit(const WipeOnExit&) = delete;
     WipeOnExit& operator=(const WipeOnExit&) = delete;
+    void release() noexcept { enabled_ = false; }
 private:
     Bytes& bytes_;
     bool enabled_;
+};
+class WipeMemoryOnExit {
+public:
+    WipeMemoryOnExit(void* data, size_t size, bool enabled = true) : data_(data), size_(enabled ? size : 0) {}
+    ~WipeMemoryOnExit() { wipe(data_, size_); }
+    WipeMemoryOnExit(const WipeMemoryOnExit&) = delete;
+    WipeMemoryOnExit& operator=(const WipeMemoryOnExit&) = delete;
+private:
+    void* data_;
+    size_t size_;
 };
 }

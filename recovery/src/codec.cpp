@@ -1,9 +1,11 @@
 #include "codec.hpp"
 #include "io.hpp"
+#include "crypto.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <mutex>
 #include <stdexcept>
+#define ZSTD_STATIC_LINKING_ONLY
 #include <zstd.h>
 extern "C" {
 #include <gf_complete.h>
@@ -15,6 +17,7 @@ extern "C" {
 namespace rz {
 Digest hash(const void* data, size_t size) {
     blake3_hasher h;
+    WipeMemoryOnExit cleanup(&h, sizeof h);
     blake3_hasher_init(&h);
     blake3_hasher_update(&h, data, size);
     Digest out{};
@@ -45,23 +48,42 @@ Digest block_hash(const UUID& uuid, uint32_t group, uint32_t shard, uint32_t str
     return out;
 }
 Bytes compress_frame(const Bytes& data) {
-    Bytes out(ZSTD_compressBound(data.size()));
+    Bytes out(ZSTD_compressBound(data.size())); WipeOnExit cleanup(out);
     auto n = ZSTD_compress(out.data(), out.size(), data.data(), data.size(), 3);
     if (ZSTD_isError(n)) throw std::runtime_error(ZSTD_getErrorName(n));
     out.resize(n);
-    return out;
+    cleanup.release(); return out;
 }
-Bytes decompress_frame(const Bytes& data, uint32_t size) {
+struct FrameDecoder::Impl {
+    Impl() : storage(std::malloc(FrameDecoder::memory_usage())) {
+        if (!storage) throw std::bad_alloc();
+        context = ZSTD_initStaticDCtx(storage.get(), FrameDecoder::memory_usage());
+        if (!context) throw std::runtime_error("Cannot initialize Zstd decoder");
+    }
+    struct Cleanup {
+        void operator()(void* memory) const noexcept {
+            if (memory) { wipe(memory, FrameDecoder::memory_usage()); std::free(memory); }
+        }
+    };
+    std::unique_ptr<void, Cleanup> storage;
+    ZSTD_DCtx* context = nullptr;
+};
+FrameDecoder::FrameDecoder() : impl_(std::make_unique<Impl>()) {}
+FrameDecoder::~FrameDecoder() = default;
+size_t FrameDecoder::memory_usage() { return ZSTD_estimateDCtxSize(); }
+Bytes FrameDecoder::decode(const Bytes& data, uint32_t size) {
+    check_cancel();
     if (size == 0 || size > FrameSize || data.size() > ZSTD_compressBound(FrameSize))
         throw std::runtime_error("Invalid frame size");
     if (ZSTD_findFrameCompressedSize(data.data(), data.size()) != data.size() ||
         ZSTD_getFrameContentSize(data.data(), data.size()) != size)
         throw std::runtime_error("Invalid independent Zstd frame");
-    Bytes out(size);
-    auto n = ZSTD_decompress(out.data(), out.size(), data.data(), data.size());
+    Bytes out(size); WipeOnExit cleanup(out);
+    auto n = ZSTD_decompressDCtx(impl_->context, out.data(), out.size(), data.data(), data.size());
     if (ZSTD_isError(n) || n != size) throw std::runtime_error("Zstd decompression failed");
-    return out;
+    check_cancel(); cleanup.release(); return out;
 }
+Bytes decompress_frame(const Bytes& data, uint32_t size) { FrameDecoder decoder; return decoder.decode(data, size); }
 Digest block_hash_v2(const UUID& uuid, uint32_t group, uint32_t shard, const Bytes& block) {
     blake3_hasher h; blake3_hasher_init(&h);
     constexpr char domain[] = "rz-block-v2";

@@ -7,6 +7,8 @@ namespace fs = std::filesystem;
 constexpr uint64_t MaxManifest = 16 * 1024 * 1024;
 constexpr uint64_t MaxVolume = 1024ULL * 1024 * 1024;
 constexpr uint64_t MaxOutput = 64ULL * 1024 * 1024 * 1024;
+// Profile 5 alone opts into the larger limit. Legacy readers retain MaxOutput.
+constexpr uint64_t MaxPagedOutput = 1024ULL * 1024 * 1024 * 1024;
 constexpr uint32_t HeaderSize = 120;
 struct Frame { uint64_t offset; uint32_t stored, plain; };
 struct Entry {

@@ -1,0 +1,216 @@
+{
+  "profile4_performance": {
+    "bytes": 134217728,
+    "profile": 4,
+    "data_volumes": 10,
+    "recovery_volumes": 2,
+    "threads": 4,
+    "runs": 3,
+    "binary_sha256": {
+      "before": "6d5b9469eb32cde0125da80e96586f7151248057c72f5ca3c66d7ded90e71f2c",
+      "after": "743f9f995e61d9c94f4be25aabbf69eaf39c157359698f3a6d02911dc388b0e0"
+    },
+    "modes": {
+      "plain": {
+        "milliseconds": {
+          "before": {
+            "create": [
+              360.295667,
+              359.42108299999995,
+              360.61487500000044
+            ],
+            "verify": [
+              221.9377920000001,
+              222.77674999999996,
+              222.81608300000056
+            ],
+            "extract": [
+              237.81050000000005,
+              235.34691700000022,
+              235.0424999999996
+            ]
+          },
+          "after": {
+            "create": [
+              487.029959,
+              274.7085830000002,
+              277.22183300000046
+            ],
+            "verify": [
+              160.921125,
+              158.7619170000001,
+              162.1168329999998
+            ],
+            "extract": [
+              151.12587500000018,
+              149.10587500000005,
+              151.92908299999974
+            ]
+          }
+        },
+        "median_ms": {
+          "before": {
+            "create": 360.3,
+            "verify": 222.78,
+            "extract": 235.35
+          },
+          "after": {
+            "create": 277.22,
+            "verify": 160.92,
+            "extract": 151.13
+          }
+        }
+      },
+      "encrypted": {
+        "milliseconds": {
+          "before": {
+            "create": [
+              561.8169170000007,
+              476.9209580000009,
+              470.44854099999964
+            ],
+            "verify": [
+              465.82458299999985,
+              481.482999999999,
+              469.059583
+            ],
+            "extract": [
+              480.51916600000055,
+              493.01387500000084,
+              517.0898340000001
+            ]
+          },
+          "after": {
+            "create": [
+              517.662208,
+              513.2681660000013,
+              510.4061249999994
+            ],
+            "verify": [
+              227.01516700000025,
+              226.47966699999955,
+              226.23383300000023
+            ],
+            "extract": [
+              218.1012090000003,
+              215.64691700000083,
+              215.00004199999978
+            ]
+          }
+        },
+        "median_ms": {
+          "before": {
+            "create": 476.92,
+            "verify": 469.06,
+            "extract": 493.01
+          },
+          "after": {
+            "create": 513.27,
+            "verify": 226.48,
+            "extract": 215.65
+          }
+        }
+      }
+    },
+    "compatibility": "Old Release reader fully verified and extracted new plain and encrypted Profile4 archives byte-exactly.",
+    "caveat": "Encrypted creation before uses storage-only postcheck; after performs full decrypted content verification. Temp filesystem and warm OS caches; not a disk benchmark."
+  },
+  "large_content": {
+    "input_bytes": 69793218560,
+    "input_allocated_bytes": 0,
+    "profile": 5,
+    "threads": 4,
+    "data_volumes": 10,
+    "recovery_volumes": 2,
+    "extracted": false,
+    "create": {
+      "wall_seconds": 68.615,
+      "exit_code": 0,
+      "peak_rss_bytes": 94715904,
+      "timing": {
+        "version": 1,
+        "total_us": 68607250,
+        "packing_us": 37420713,
+        "compression_us": 37420128,
+        "recovery_wall_us": 3893,
+        "read_work_us": 2279,
+        "rs_work_us": 167,
+        "hash_work_us": 2610,
+        "payload_write_us": 901,
+        "index_us": 1940,
+        "volume_write_us": 533,
+        "verify_us": 31179954,
+        "publish_us": 215,
+        "recovery_workers": 4,
+        "recovery_peak_jobs": 4,
+        "recovery_estimated_bytes": 4810592,
+        "volume_write_workers": 4
+      }
+    },
+    "archive_bytes": 3950292,
+    "archive_allocated_bytes": 3985408,
+    "verify": {
+      "wall_seconds": 31.361,
+      "exit_code": 0,
+      "stdout": "bad_blocks=0 bad_data_blocks=0 unrecoverable_stripes=0 metadata_issues=0 password_authentication=not_requested key_file_authentication=not_requested",
+      "peak_rss_bytes": 88702976
+    },
+    "listing": {
+      "version": 1,
+      "encrypted": false,
+      "locked": false,
+      "directoryUnavailable": false,
+      "preservesMetadata": false,
+      "encryptionSuite": 0,
+      "requiresKeyFile": false,
+      "recovery": {
+        "profile": 5,
+        "dataBytes": 2621440,
+        "payloadBytes": 524288,
+        "volumeLimitBytes": 0,
+        "dataVolumes": 10,
+        "recoveryVolumes": 2,
+        "requestedMode": 2,
+        "requestedValue": 0,
+        "volumeSizeBytes": 329144,
+        "toleratedVolumeLosses": 2,
+        "metadataBytesPerVolume": 67000,
+        "contentLimitBytes": 1099511627776
+      },
+      "entries": [
+        {
+          "path": "65GiB-zero.bin",
+          "size": 69793218560,
+          "isDirectory": false
+        }
+      ]
+    },
+    "validated": true,
+    "validation": "Created and fully verified65GiB expanded content; listing confirms exact input size and1TiB format limit. Temporary source/archive removed; no large extraction was performed."
+  },
+  "cross_backend": {
+    "profile": 5,
+    "results": [
+      {
+        "create": "NEON",
+        "repair": "scalar",
+        "lost_volumes": [
+          "d000000.rzv",
+          "p000001.rzr"
+        ],
+        "byte_exact_repair": true,
+        "byte_exact_extraction": true
+      },
+      {
+        "create": "scalar",
+        "repair": "NEON",
+        "lost_volumes": [
+          "d000000.rzv",
+          "p000001.rzr"
+        ],
+        "byte_exact_repair": true,
+        "byte_exact_extraction": true
+      }
+    ]
+  }
+}

@@ -47,6 +47,8 @@ struct OperationState {
     var cancelling = false
     var showsCompression = false
     var compression: CompressionMetrics?
+    var showsProcessing = false
+    var processing: ProcessingMetrics?
     var lastProgressAt: ContinuousClock.Instant?
 
     mutating func apply(_ progress: EngineProgress) {
@@ -55,6 +57,7 @@ struct OperationState {
         fraction = progress.fraction
         detail = progress.message
         if let metrics = progress.compression { compression = metrics }
+        if let metrics = progress.processing { processing = metrics }
     }
 }
 
@@ -266,7 +269,7 @@ final class AppStore {
         showExtract = false
         let password = archivePassword
         let keyFile = archiveKeyFile
-        start("解压归档", detail: listing.url.lastPathComponent) { [self] in
+        start("解压归档", detail: listing.url.lastPathComponent, showsProcessing: true) { [self] in
             let result = try await service.extract(
                 listing.url, to: url, password: password, keyFile: keyFile, restoreAttributes: restoreAttributes,
                 progress: progressHandler())
@@ -304,7 +307,7 @@ final class AppStore {
         }
         let password = archivePassword
         let keyFile = archiveKeyFile
-        start("完整性测试", detail: listing.url.lastPathComponent) { [self] in
+        start("完整性测试", detail: listing.url.lastPathComponent, showsProcessing: true) { [self] in
             try await service.test(listing.url, password: password, keyFile: keyFile, progress: progressHandler())
             return nil
         } onPassword: { [self] in
@@ -467,13 +470,14 @@ final class AppStore {
     }
 
     private func start(
-        _ title: String, detail: String, showsCompression: Bool = false,
+        _ title: String, detail: String, showsCompression: Bool = false, showsProcessing: Bool = false,
         action: @escaping @MainActor () async throws -> URL?,
         onPassword: (@MainActor () -> Void)? = nil,
         onKeyFile: (@MainActor () -> Void)? = nil,
         onSuccess: (@MainActor () -> Void)? = nil
     ) {
-        operation = OperationState(title: title, detail: detail, showsCompression: showsCompression)
+        operation = OperationState(
+            title: title, detail: detail, showsCompression: showsCompression, showsProcessing: showsProcessing)
         notice = nil
         metadataWarningMessage = nil
         lastOutput = nil

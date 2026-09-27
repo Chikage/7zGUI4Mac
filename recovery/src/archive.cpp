@@ -1,4 +1,5 @@
 #include "archive.hpp"
+#include "read_progress.hpp"
 #include "io.hpp"
 #include "inputs.hpp"
 #include <algorithm>
@@ -139,13 +140,17 @@ std::vector<int> read_stripe(const Archive& a, const Files& files, uint32_t grou
     }
     return missing;
 }
-Verification scan(const Archive& a) {
+Verification scan(const Archive& a, ReadProgress* progress = nullptr) {
+    uint64_t bytes = 0;
+    for (const auto& group : a.manifest.groups) bytes += uint64_t(group.stripes) * N * BlockSize;
+    if (progress) progress->start("storage", bytes);
     Verification result; result.metadata_issues = a.metadata_issues;
     auto blocks = empty_stripe();
     for (uint32_t g = 0; g < a.manifest.groups.size(); ++g) {
         auto files = open_group(a, g);
         for (uint32_t stripe = 0; stripe < a.manifest.groups[g].stripes; ++stripe) {
             auto missing = read_stripe(a, files, g, stripe, blocks);
+            if (progress) progress->advance(uint64_t(N) * BlockSize);
             result.bad_blocks += missing.size();
             result.bad_data_blocks += std::count_if(missing.begin(), missing.end(), [](int i) { return i < static_cast<int>(K); });
             if (missing.size() > M) ++result.unrecoverable_stripes;
@@ -264,7 +269,7 @@ void create_selected_archive(const std::vector<fs::path>& source_paths, const fs
     create_from_inputs(plan.root, plan.paths, output, volume_size, threads);
 }
 Manifest list_archive(const fs::path& directory) { return load_archive(directory).manifest; }
-Verification verify_archive(const fs::path& directory) { return scan(load_archive(directory)); }
+Verification verify_archive(const fs::path& directory, ReadProgress* progress) { return scan(load_archive(directory), progress); }
 void repair_archive(const fs::path& directory, const fs::path& output) {
     auto a = load_archive(directory); require_outside(a.directory, output);
     Staging staging(output); ReedSolomon rs; auto blocks = empty_stripe();
@@ -292,10 +297,11 @@ void repair_archive(const fs::path& directory, const fs::path& output) {
     if (verify_archive(staging.path).exit_code() != 0) throw std::runtime_error("Repaired output verification failed");
     staging.commit();
 }
-void extract_archive(const fs::path& directory, const fs::path& output) {
+void extract_archive(const fs::path& directory, const fs::path& output, ReadProgress* progress) {
     auto a = load_archive(directory); require_outside(a.directory, output);
-    if (scan(a).bad_data_blocks) throw std::runtime_error("Data blocks are damaged or missing; run repair first");
+    if (scan(a, progress).bad_data_blocks) throw std::runtime_error("Data blocks are damaged or missing; run repair first");
     Staging staging(output); StreamReader stream(a);
+    if (progress) progress->contents("extracting", a.manifest.entries);
     for (const auto& e : a.manifest.entries) {
         check_cancel();
         auto target = staging.path / e.path;
@@ -307,11 +313,14 @@ void extract_archive(const fs::path& directory, const fs::path& output) {
         for (const auto& f : e.frames) {
             auto plain = decompress_frame(stream.read(f.offset, f.stored), f.plain);
             blake3_hasher_update(&digest, plain.data(), plain.size()); file.append(plain);
+            if (progress) progress->advance(plain.size());
         }
         Digest actual{}; blake3_hasher_finalize(&digest, actual.data(), actual.size());
         if (actual != e.digest) throw std::runtime_error("Extracted file failed BLAKE3 verification: " + e.path);
         file.sync();
+        if (progress) progress->file_completed();
     }
+    if (progress) progress->phase("publishing");
     staging.commit();
 }
 }

@@ -127,7 +127,8 @@ actor RecoveryArchiveService {
         let credentials = try credentialArguments(password, keyFile: keyFile)
         progress(EngineProgress(message: "正在校验数据卷、恢复卷和索引…"))
         let result = try await run(
-            ["verify", directory.path] + credentials, password: password, progress: progress)
+            ["verify", directory.path, "--progress"] + credentials, password: password, readOperation: .verify,
+            progress: progress)
         switch result.status {
         case 2: throw ArchiveError.recoveryRepairable
         case 3: throw ArchiveError.recoveryUnrecoverable
@@ -142,12 +143,13 @@ actor RecoveryArchiveService {
         guard !sources.isEmpty else { throw ArchiveError.invalidInput("请先添加要压缩的文件。") }
         let recoveryArguments: [String]
         if let counts = options.recoveryVolumeCounts {
-            recoveryArguments = try counts.arguments()
+            recoveryArguments = ["--profile", "\(options.countedRecoveryProfile.rawValue)"] + (try counts.arguments())
         } else {
             guard (1024 * 1024...16 * 1024 * 1024 * 1024).contains(options.recoveryVolumeSizeBytes) else {
                 throw ArchiveError.invalidInput("每卷上限必须在 1 MiB–16 GiB 之间。")
             }
-            recoveryArguments = ["--volume-size", "\(options.recoveryVolumeSizeBytes)"] + (try options.recoveryPayload.arguments())
+            recoveryArguments =
+                ["--volume-size", "\(options.recoveryVolumeSizeBytes)"] + (try options.recoveryPayload.arguments())
         }
         guard !options.generateRecoveryKeyFile || options.password.isEmpty else {
             throw ArchiveError.invalidInput("请选择密码或密钥文件中的一种保护方式。")
@@ -187,7 +189,7 @@ actor RecoveryArchiveService {
         return try await writeOutput(
             to: destination, password: password, reportsMetadata: true, progress: progress, message: "正在校验、解压并恢复文件属性…"
         ) { output in
-            ["extract", directory.path, output.path, "--json"] + credentials
+            ["extract", directory.path, output.path, "--json", "--progress"] + credentials
                 + (restoreAttributes ? [] : ["--no-attributes"])
         }
     }
@@ -228,7 +230,8 @@ actor RecoveryArchiveService {
         let output = stage.appendingPathComponent("result", isDirectory: true)
         progress(EngineProgress(message: message))
         let result = try await run(
-            arguments(output), password: password, captureListing: reportsMetadata, progress: progress)
+            arguments(output), password: password, captureListing: reportsMetadata,
+            readOperation: reportsMetadata ? .extract : nil, progress: progress)
         if !(reportsMetadata && result.status == 5) { try check(result) }
         var warnings: [String] = []
         var count = 0
@@ -284,6 +287,7 @@ actor RecoveryArchiveService {
 
     private func run(
         _ arguments: [String], password: String = "", captureListing: Bool = false,
+        readOperation: ArchiveReadOperation? = nil,
         progress: @escaping @Sendable (EngineProgress) -> Void = { _ in }
     ) async throws -> ProcessResult {
         guard fm.isExecutableFile(atPath: runner.executable.path) else { throw ArchiveError.recoveryEngineMissing }
@@ -291,7 +295,8 @@ actor RecoveryArchiveService {
             !password.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
         else { throw ArchiveError.invalidInput("密码不能包含换行或控制字符，且不能超过 1024 字节。") }
         return try await runner.run(
-            arguments: arguments, password: password, captureListing: captureListing, progress: progress)
+            arguments: arguments, password: password, captureListing: captureListing, readOperation: readOperation,
+            progress: progress)
     }
 
     private func check(_ result: ProcessResult) throws {

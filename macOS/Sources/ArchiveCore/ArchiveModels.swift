@@ -102,6 +102,11 @@ public enum RecoveryEncryption: Int, CaseIterable, Identifiable, Sendable {
     var argument: String { self == .standard ? "standard" : "dual" }
 }
 
+public enum CountedRecoveryProfile: Int, Sendable {
+    case compatible = 4
+    case paged = 5
+}
+
 public struct CompressionOptions: Sendable {
     public var format: ArchiveFormat
     public var level: Int
@@ -111,6 +116,8 @@ public struct CompressionOptions: Sendable {
     public var recoveryPayload: RecoveryPayload
     /// Counted, equal-sized volumes. Nil retains the legacy size/budget API.
     public var recoveryVolumeCounts: RecoveryVolumeCounts?
+    /// New counted archives use the protected paginated index. Ignored by the legacy size/budget API.
+    public var countedRecoveryProfile: CountedRecoveryProfile
     public var preserveMetadata: Bool
     public var recoveryEncryption: RecoveryEncryption
     public var generateRecoveryKeyFile: Bool
@@ -120,7 +127,7 @@ public struct CompressionOptions: Sendable {
         recoveryVolumeSizeBytes: Int64 = 64 * 1024 * 1024,
         recoveryPayload: RecoveryPayload = .percentage(basisPoints: 2000), preserveMetadata: Bool = true,
         recoveryEncryption: RecoveryEncryption = .standard, generateRecoveryKeyFile: Bool = false,
-        recoveryVolumeCounts: RecoveryVolumeCounts? = nil
+        recoveryVolumeCounts: RecoveryVolumeCounts? = nil, countedRecoveryProfile: CountedRecoveryProfile = .paged
     ) {
         self.format = format
         self.level = level
@@ -129,6 +136,7 @@ public struct CompressionOptions: Sendable {
         self.recoveryVolumeSizeBytes = recoveryVolumeSizeBytes
         self.recoveryPayload = recoveryPayload
         self.recoveryVolumeCounts = recoveryVolumeCounts
+        self.countedRecoveryProfile = countedRecoveryProfile
         self.preserveMetadata = preserveMetadata
         self.recoveryEncryption = recoveryEncryption
         self.generateRecoveryKeyFile = generateRecoveryKeyFile
@@ -150,11 +158,38 @@ public struct EngineProgress: Sendable {
     public let fraction: Double?
     public let message: String
     public let compression: CompressionMetrics?
+    public let processing: ProcessingMetrics?
     public let timestamp = ContinuousClock.now
-    public init(fraction: Double? = nil, message: String, compression: CompressionMetrics? = nil) {
+    public init(
+        fraction: Double? = nil, message: String, compression: CompressionMetrics? = nil,
+        processing: ProcessingMetrics? = nil
+    ) {
         self.fraction = fraction
         self.message = message
         self.compression = compression
+        self.processing = processing
+    }
+}
+
+public enum ArchiveReadOperation: Sendable {
+    case extract, verify
+
+    var message: String { self == .extract ? "正在解压文件…" : "正在校验文件内容…" }
+    var completionMessage: String { self == .extract ? "解压完成，正在保存…" : "校验完成" }
+}
+
+public struct ProcessingMetrics: Sendable, Equatable {
+    public var processedBytes: Int64 = 0
+    public var totalBytes: Int64
+    public var completedFiles: Int64 = 0
+    /// Nil while checking storage blocks, where original file counts do not apply.
+    public var totalFiles: Int64?
+    public var bytesPerSecond: Double?
+    public var isEstimated = false
+
+    public init(totalBytes: Int64, totalFiles: Int64? = nil) {
+        self.totalBytes = totalBytes
+        self.totalFiles = totalFiles
     }
 }
 

@@ -65,9 +65,11 @@ struct BrowserItemsView<MenuContent: View>: View {
     var preview: ((Set<String>) -> Bool)? = nil
     @ViewBuilder let menu: (Set<String>) -> MenuContent
     @AppStorage("browserLayout") private var layout: BrowserLayout = .details
+    @AppStorage("browserShowsCheckboxes") private var showsCheckboxes = false
     @State private var sortOrder = [KeyPathComparator(\BrowserEntry.name)]
     @State private var anchor: String?
     @State private var cursor: String?
+    @State private var mouseInteraction = BrowserMouseInteraction()
     @FocusState private var gridFocused: Bool
 
     private var rows: [BrowserEntry] {
@@ -76,8 +78,8 @@ struct BrowserItemsView<MenuContent: View>: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if layout != .details {
-                HStack {
+            HStack(spacing: 12) {
+                if layout != .details {
                     Menu {
                         Button("名称") { sortOrder = [KeyPathComparator(\BrowserEntry.name)] }
                         Button("大小") { sortOrder = [KeyPathComparator(\BrowserEntry.size)] }
@@ -93,15 +95,35 @@ struct BrowserItemsView<MenuContent: View>: View {
                         }
                     } label: { Label("排序", systemImage: "arrow.up.arrow.down") }
                     .menuStyle(.borderlessButton).fixedSize()
-                    Spacer()
-                }.padding(.horizontal, 16).padding(.vertical, 8)
-                Divider()
-            }
+                }
+                Button("全选") { selection = Set(entries.map(\.id)) }
+                    .disabled(entries.isEmpty).help("选择当前显示的所有项目")
+                Button("反选") { selection = Set(entries.map(\.id)).subtracting(selection) }
+                    .disabled(entries.isEmpty).help("反转当前显示项目的选中状态")
+                Button("取消选择") { selection = [] }
+                    .disabled(selection.isEmpty)
+                Spacer(minLength: 12)
+                Toggle("显示复选框", isOn: $showsCheckboxes)
+                    .toggleStyle(.checkbox).fixedSize()
+            }.controlSize(.small).padding(.horizontal, 16).padding(.vertical, 8)
+            Divider()
             Group {
                 switch layout {
                 case .details: details
                 case .list: list
                 default: grid
+                }
+            }
+            .background {
+                BrowserMouseMonitor(interaction: mouseInteraction) { id, event in
+                    if event.type == .rightMouseDown || event.modifierFlags.contains(.control) {
+                        if !selection.contains(id) {
+                            select(id, modifiers: [])
+                        }
+                    } else if layout != .details && layout != .list && event.clickCount == 1 {
+                        gridFocused = true
+                        select(id, modifiers: event.modifierFlags)
+                    }
                 }
             }
             .onKeyPress(.space, phases: .down) { press in
@@ -127,8 +149,9 @@ struct BrowserItemsView<MenuContent: View>: View {
     private var details: some View {
         Table(rows, selection: $selection, sortOrder: $sortOrder) {
             TableColumn("名称", value: \.name) { entry in
-                BrowserEntryLabel(entry: entry, size: 18, showsPath: searchActive)
+                rowLabel(entry, size: 18, showsPath: searchActive)
                     .padding(.vertical, 4)
+                    .background { mouseTarget(entry) }
             }.width(min: 180, ideal: 300)
             TableColumn("修改日期", value: \.modified) { entry in
                 Text(entry.modified.isEmpty ? "—" : String(entry.modified.prefix(16)))
@@ -147,8 +170,9 @@ struct BrowserItemsView<MenuContent: View>: View {
 
     private var list: some View {
         List(rows, selection: $selection) { entry in
-            BrowserEntryLabel(entry: entry, size: 18, showsPath: searchActive)
+            rowLabel(entry, size: 18, showsPath: searchActive)
                 .padding(.vertical, 3).tag(entry.id)
+                .background { mouseTarget(entry) }
         }
         .listStyle(.inset)
         .contextMenu(forSelectionType: String.self, menu: menu, primaryAction: open)
@@ -163,16 +187,14 @@ struct BrowserItemsView<MenuContent: View>: View {
                         ForEach(rows) { entry in
                             gridCell(entry)
                                 .id(entry.id)
+                                .background { mouseTarget(entry) }
                                 .onTapGesture(count: 2) {
                                     selection = [entry.id]
                                     open([entry.id])
                                 }
-                                .onTapGesture {
-                                    gridFocused = true
-                                    select(entry.id, modifiers: NSEvent.modifierFlags)
-                                }
                                 .contextMenu { menu(selection.contains(entry.id) ? selection : [entry.id]) }
                                 .accessibilityAddTraits(.isButton)
+                                .accessibilityLabel(entry.name)
                                 .accessibilityAddTraits(selection.contains(entry.id) ? .isSelected : [])
                                 .accessibilityAction {
                                     gridFocused = true
@@ -220,10 +242,16 @@ struct BrowserItemsView<MenuContent: View>: View {
         }
     }
 
+    private func mouseTarget(_ entry: BrowserEntry) -> some View {
+        BrowserMouseTarget(
+            id: entry.id, usesTableRow: layout == .details || layout == .list,
+            interaction: mouseInteraction)
+    }
+
     private func gridCell(_ entry: BrowserEntry) -> some View {
         Group {
             if layout == .small {
-                BrowserEntryLabel(entry: entry, size: layout.iconSize, showsPath: false)
+                rowLabel(entry, size: layout.iconSize, showsPath: false)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(8)
             } else {
                 VStack(spacing: 8) {
@@ -232,6 +260,9 @@ struct BrowserItemsView<MenuContent: View>: View {
                         .multilineTextAlignment(.center).frame(height: 36, alignment: .top)
                     if entry.isEncrypted { Image(systemName: "lock.fill").accessibilityLabel("已加密") }
                 }.frame(maxWidth: .infinity).padding(12)
+                    .overlay(alignment: .topLeading) {
+                        if showsCheckboxes { checkbox(entry).padding(4) }
+                    }
             }
         }
         .background(selection.contains(entry.id) ? Color.accentColor.opacity(0.18) : .clear,
@@ -241,7 +272,33 @@ struct BrowserItemsView<MenuContent: View>: View {
                 .strokeBorder(selection.contains(entry.id) ? Color.accentColor : .clear, lineWidth: 1)
         }
         .contentShape(Rectangle()).help(entry.id)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: showsCheckboxes ? .contain : .combine)
+    }
+
+    private func rowLabel(_ entry: BrowserEntry, size: CGFloat, showsPath: Bool) -> some View {
+        HStack(spacing: 8) {
+            if showsCheckboxes { checkbox(entry) }
+            BrowserEntryLabel(entry: entry, size: size, showsPath: showsPath)
+        }
+    }
+
+    private func checkbox(_ entry: BrowserEntry) -> some View {
+        Toggle("选择 \(entry.name)", isOn: Binding(
+            get: { selection.contains(entry.id) },
+            set: { selected in
+                if selected { selection.insert(entry.id) } else { selection.remove(entry.id) }
+                anchor = entry.id
+                cursor = entry.id
+            }
+        ))
+        .toggleStyle(.checkbox).labelsHidden()
+        .help("选择或取消选择“\(entry.name)”")
+        .padding(4)
+        .background {
+            BrowserMouseTarget(
+                id: entry.id, usesTableRow: false, interaction: mouseInteraction,
+                isSelectionControl: true)
+        }
     }
 
     private func select(_ id: String, modifiers: NSEvent.ModifierFlags) {

@@ -13,5 +13,5 @@ InputPlan selected_inputs(const std::vector<fs::path>& sources, const fs::path& 
 void pack(const fs::path& root, const InputPaths& paths, const fs::path& spool, Manifest& output, CompressionProgress* progress = nullptr, uint32_t threads = 0);
 using FrameEncoder = std::function<Bytes(const Bytes&, uint64_t, uint32_t)>;
 void pack_contents(const fs::path& root, const InputPaths& paths, File& spool, Manifest& output,
-                   const FrameEncoder& encoder = {}, uint64_t reserved_plain_bytes = 0, CompressionProgress* progress = nullptr, uint32_t threads = 0);
+                   const FrameEncoder& encoder = {}, uint64_t reserved_plain_bytes = 0, CompressionProgress* progress = nullptr, uint32_t threads = 0, uint64_t max_output = MaxOutput);
 }

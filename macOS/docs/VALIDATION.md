@@ -1,5 +1,13 @@
 # 本地验证记录
 
+## Profile 5 集成 — 2026-09-27
+
+- RZ计数创建默认显式选择Profile5；CLI旧默认值及显式Profile4仍保留。
+- Profile5几何/物理大小JSON校验、1TiB内容上限、错误字段拒绝、默认双层密钥文件自动解锁及修复已覆盖。
+- 使用新建arm64、最低macOS14的rz0.7.0后端，Swift warnings-as-errors全套59个测试函数通过；含Profile4/5参数化往返。
+- 底层故障注入、内存/线程检查器与65GiB实际验证见 [后端验证记录](../../recovery/docs/VALIDATION.md)。
+
+
 ## 数据卷数量 + 恢复卷数量 — 2026-09-27
 
 - GUI 新建可恢复 RZ 改用 profile 4；旧的每卷大小、恢复比例/容量输入替换为数据卷 K 与恢复卷 M。

@@ -121,7 +121,10 @@ void write_key_file(const fs::path& path, const UUID& uuid, const Password& key)
     auto checksum = key_file_checksum(w.b.data(), w.b.size()); w.raw(checksum.data(), 32);
     File file(path, File::Mode::New); file.append(w.b); file.sync();
 }
-ArchiveKeys::ArchiveKeys(const unsigned char* master, uint32_t suite, bool writable) : suite_(suite), writable_(writable) {
+ArchiveKeys::ArchiveKeys(const unsigned char* master, uint32_t suite, bool writable, uint64_t max_output)
+    : suite_(suite), writable_(writable), max_record_offset_(max_output) {
+    if (max_output > UINT64_MAX - max_output / 100) throw std::runtime_error("Invalid encrypted stream limit");
+    max_record_offset_ += max_output / 100;
     validate_crypto_suite(suite);
     for (uint64_t id = 1; id <= 4; ++id)
         if (crypto_kdf_blake2b_derive_from_key(keys_.data() + (id - 1) * 32, 32, id,
@@ -138,7 +141,7 @@ ArchiveKeys::ArchiveKeys(const unsigned char* master, uint32_t suite, bool writa
             throw std::runtime_error("Archive manifest key derivation failed");
     }
 }
-ArchiveKeys create_keys(const UUID& uuid, const Password& password, KeySlot& slot) {
+ArchiveKeys create_keys(const UUID& uuid, const Password& password, KeySlot& slot, uint64_t max_output) {
     validate_crypto_suite(slot.suite); bool dual = slot.suite == DualCryptoProfile;
     if (dual) require_aes();
     initialize(); randombytes_buf(slot.salt.data(), slot.salt.size()); randombytes_buf(slot.nonce.data(), slot.nonce.size());
@@ -148,7 +151,7 @@ ArchiveKeys create_keys(const UUID& uuid, const Password& password, KeySlot& slo
     auto inner_key = dual ? derive(key.data(), 1, "RZ3WRAP!") : SecretBytes(32);
     if (!dual) std::memcpy(inner_key.data(), key.data(), 32);
     auto aad = slot_aad(uuid, slot, 1); unsigned long long size = 0;
-    Bytes wrapped(master_size + 16);
+    Bytes wrapped(master_size + 16); WipeOnExit wipe_wrapped(wrapped);
     if (crypto_aead_xchacha20poly1305_ietf_encrypt(wrapped.data(), &size, master.data(), master_size,
         aad.data(), aad.size(), nullptr, slot.nonce.data(), inner_key.data()) != 0 || size != wrapped.size())
         throw std::runtime_error("Key wrapping failed");
@@ -158,9 +161,8 @@ ArchiveKeys create_keys(const UUID& uuid, const Password& password, KeySlot& slo
         if (crypto_aead_aes256gcm_encrypt(slot.wrapped_key.data(), &size, wrapped.data(), wrapped.size(),
             outer_aad.data(), outer_aad.size(), nullptr, slot.aes_nonce.data(), outer_key.data()) != 0 || size != slot.wrapped_key.size())
             throw std::runtime_error("Key wrapping failed");
-        wipe(wrapped);
     } else slot.wrapped_key = std::move(wrapped);
-    return ArchiveKeys(master.data(), slot.suite);
+    return ArchiveKeys(master.data(), slot.suite, true, max_output);
 }
 ArchiveKeys unlock_keys(const UUID& uuid, const Password& password, const KeySlot& slot) {
     validate_crypto_suite(slot.suite); bool dual = slot.suite == DualCryptoProfile;
@@ -171,17 +173,16 @@ ArchiveKeys unlock_keys(const UUID& uuid, const Password& password, const KeySlo
     auto inner_key = dual ? derive(key.data(), 1, "RZ3WRAP!") : SecretBytes(32);
     if (!dual) std::memcpy(inner_key.data(), key.data(), 32);
     auto aad = slot_aad(uuid, slot, 1); SecretBytes master(dual ? 64 : 32); unsigned long long size = 0;
-    Bytes wrapped = slot.wrapped_key;
+    Bytes wrapped = slot.wrapped_key; WipeOnExit wipe_wrapped(wrapped);
     if (dual) {
         auto outer_key = derive(key.data(), 2, "RZ3WRAP!"); auto outer_aad = slot_aad(uuid, slot, 2);
         wrapped.resize(80);
         if (crypto_aead_aes256gcm_decrypt(wrapped.data(), &size, nullptr, slot.wrapped_key.data(), slot.wrapped_key.size(),
             outer_aad.data(), outer_aad.size(), slot.aes_nonce.data(), outer_key.data()) != 0 || size != 80)
-            { wipe(wrapped); if (slot.key_file) throw KeyFileError(); throw PasswordError(); }
+            { if (slot.key_file) throw KeyFileError(); throw PasswordError(); }
     }
     auto status = crypto_aead_xchacha20poly1305_ietf_decrypt(master.data(), &size, nullptr, wrapped.data(), wrapped.size(),
         aad.data(), aad.size(), slot.nonce.data(), inner_key.data());
-    wipe(wrapped);
     if (status != 0 || size != (dual ? 64U : 32U)) { if (slot.key_file) throw KeyFileError(); throw PasswordError(); }
     return ArchiveKeys(master.data(), slot.suite, false);
 }
@@ -189,7 +190,7 @@ Bytes ArchiveKeys::seal(const UUID& uuid, RecordKind kind, uint64_t offset, uint
     auto id = static_cast<uint32_t>(kind); bool dual = suite_ == DualCryptoProfile;
     if (!writable_ || id < 1 || id > 3 || plain_size > FrameSize || compressed.size() > FrameSize + FrameSize / 100 - 68)
         throw std::runtime_error("Invalid encrypted record input");
-    if (dual && (offset < next_offset_ || offset > MaxOutput + MaxOutput / 100))
+    if (dual && (offset < next_offset_ || offset > max_record_offset_ || offset > UINT64_MAX - compressed.size() - 68))
         throw std::runtime_error("Encrypted record positions must advance; refusing nonce reuse");
     Bytes out(compressed.size() + RecordOverhead); randombytes_buf(out.data(), 24);
     auto aad = record_aad(uuid, kind, offset, plain_size, suite_, 1); unsigned long long size = 0;
@@ -212,7 +213,7 @@ Bytes ArchiveKeys::open(const UUID& uuid, RecordKind kind, uint64_t offset, uint
     auto id = static_cast<uint32_t>(kind); bool dual = suite_ == DualCryptoProfile;
     if (id < 1 || id > 3 || record.size() < RecordOverhead + (dual ? 28 : 0) || record.size() > FrameSize + FrameSize / 100)
         throw std::runtime_error("Invalid encrypted record size");
-    Bytes inner; const Bytes* source = &record; unsigned long long size = 0;
+    Bytes inner; WipeOnExit wipe_inner(inner); const Bytes* source = &record; unsigned long long size = 0;
     if (dual) {
         auto aes_key = derive(keys_.data() + 128 + (id - 1) * 32, offset, "RZ3REC2!");
         auto outer_aad = record_aad(uuid, kind, offset, plain_size, suite_, 2);
@@ -221,23 +222,25 @@ Bytes ArchiveKeys::open(const UUID& uuid, RecordKind kind, uint64_t offset, uint
         inner.resize(record.size() - 28);
         if (crypto_aead_aes256gcm_decrypt(inner.data(), &size, nullptr, record.data() + 12, record.size() - 12,
             outer_aad.data(), outer_aad.size(), record.data(), aes_key.data()) != 0 || size != inner.size())
-            { wipe(inner); throw std::runtime_error("Archive authentication failed"); }
+            throw std::runtime_error("Archive authentication failed");
         source = &inner;
     }
-    Bytes out(source->size() - RecordOverhead); auto aad = record_aad(uuid, kind, offset, plain_size, suite_, 1);
+    Bytes out(source->size() - RecordOverhead); WipeOnExit wipe_out(out);
+    auto aad = record_aad(uuid, kind, offset, plain_size, suite_, 1);
     auto status = crypto_aead_xchacha20poly1305_ietf_decrypt(out.data(), &size, nullptr, source->data() + 24, source->size() - 24,
         aad.data(), aad.size(), source->data(), keys_.data() + (id - 1) * 32);
-    wipe(inner);
     if (status != 0 || size != out.size())
-        { wipe(out); throw std::runtime_error("Archive authentication failed"); }
-    return out;
+        throw std::runtime_error("Archive authentication failed");
+    wipe_out.release(); return out;
 }
 Digest ArchiveKeys::manifest_mac(const Bytes& bytes) const {
     blake3_hasher h; blake3_hasher_init_keyed(&h, keys_.data() + 96);
+    WipeMemoryOnExit wipe_hasher(&h, sizeof h);
     constexpr char domain[] = "rz3-public-index";
     blake3_hasher_update(&h, domain, sizeof(domain) - 1); blake3_hasher_update(&h, bytes.data(), bytes.size());
     Digest out{}; blake3_hasher_finalize(&h, out.data(), out.size()); return out;
 }
 bool secure_equal(const Digest& a, const Digest& b) { return sodium_memcmp(a.data(), b.data(), a.size()) == 0; }
-void wipe(Bytes& bytes) { if (!bytes.empty()) sodium_memzero(bytes.data(), bytes.size()); }
+void wipe(void* data, size_t size) noexcept { if (size) sodium_memzero(data, size); }
+void wipe(Bytes& bytes) noexcept { wipe(bytes.data(), bytes.size()); }
 }

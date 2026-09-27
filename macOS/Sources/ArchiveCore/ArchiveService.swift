@@ -36,9 +36,13 @@ public actor ArchiveService {
         }
         guard keyFile == nil else { throw ArchiveError.invalidInput("独立密钥文件仅适用于 RZ 归档。") }
         try validatePassword(password)
+        progress(EngineProgress(message: "正在读取归档索引…"))
+        let listing = try await list(url, password: password)
         let result = try await runner.run(
             arguments: ["t", "-sccUTF-8", "-bsp1", "-bse1", "-y", "--", url.path],
-            password: password, progress: progress)
+            password: password, readOperation: .verify,
+            totals: ProcessingMetrics(totalBytes: listing.totalSize, totalFiles: Int64(listing.fileCount)),
+            progress: progress)
         try check(result)
     }
 
@@ -121,9 +125,12 @@ public actor ArchiveService {
         try fm.createDirectory(at: payload, withIntermediateDirectories: false)
         let result = try await runner.run(
             arguments: ["x", "-o\(payload.path)", "-aou", "-y", "-sccUTF-8", "-bsp1", "-bse1", "--", url.path],
-            password: password, progress: progress)
+            password: password, readOperation: .extract,
+            totals: ProcessingMetrics(totalBytes: listing.totalSize, totalFiles: Int64(listing.fileCount)),
+            progress: progress)
         try check(result)
         try Task.checkCancellation()
+        progress(EngineProgress(message: "正在检查解压结果并保存…"))
         try validateExtractedTree(payload)
         try fm.moveItem(at: payload, to: destination)
         return ArchiveExtraction(url: destination)

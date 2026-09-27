@@ -5,13 +5,33 @@ import Foundation
 struct EngineProgressParser {
     private var buffer = Data()
     private var metrics: CompressionMetrics?
+    private var processing: ProcessingMetrics?
+    private let readOperation: ArchiveReadOperation?
+    private var recoveryRead = false
+    private var reportsFiles = false
     private var fraction: Double?
     private var message = "正在处理文件…"
     private var startedAt: TimeInterval?
     private var lastProgress: EngineProgress?
     private let compressionOutput: URL?
 
-    init(compressionOutput: URL? = nil) { self.compressionOutput = compressionOutput }
+    init(
+        compressionOutput: URL? = nil, readOperation: ArchiveReadOperation? = nil,
+        totals: ProcessingMetrics? = nil
+    ) {
+        self.compressionOutput = compressionOutput
+        self.readOperation = readOperation
+        processing = totals
+        if let readOperation { message = readOperation.message }
+    }
+
+    mutating func start(now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> EngineProgress? {
+        guard processing != nil else { return nil }
+        startedAt = now
+        processing?.isEstimated = true
+        fraction = 0
+        return snapshot(now: now)
+    }
 
     mutating func consume(_ data: Data, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> [EngineProgress] {
         buffer.append(data)
@@ -34,6 +54,15 @@ struct EngineProgressParser {
     }
 
     mutating func finish(now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> EngineProgress? {
+        if var value = processing, !recoveryRead {
+            value.processedBytes = value.totalBytes
+            value.completedFiles = value.totalFiles ?? value.completedFiles
+            value.isEstimated = false
+            processing = value
+            fraction = 1
+            message = readOperation?.completionMessage ?? "处理完成"
+            return snapshot(now: now)
+        }
         guard var value = metrics else { return nil }
         value.processedBytes = value.totalBytes
         value.completedFiles = value.totalFiles
@@ -45,6 +74,7 @@ struct EngineProgressParser {
     }
 
     private mutating func parse(_ line: String, now: TimeInterval) -> EngineProgress? {
+        if line.hasPrefix("RZREADPROGRESS1\t") { return parseReadProgress(line, now: now) }
         if line.hasPrefix("RZPROGRESS1\t") {
             let parts = line.split(separator: "\t", omittingEmptySubsequences: false)
             guard parts.count == 8 else { return nil }
@@ -97,11 +127,57 @@ struct EngineProgressParser {
             let percentage = Double(line[match].dropLast()), percentage <= 100
         else { return nil }
         fraction = percentage / 100
+        if var value = processing {
+            // Percentage is supplied by 7-Zip; byte counts and speed are estimates.
+            value.processedBytes =
+                percentage == 100 ? value.totalBytes : Int64(Double(value.totalBytes) * percentage / 100)
+            if let files = number(in: line, pattern: #"^\d+%\s+(\d+)(?=$|\s)"#), let total = value.totalFiles {
+                value.completedFiles = min(total, max(value.completedFiles, files))
+            }
+            processing = value
+            fraction = min(0.99, percentage / 100)
+        }
         if var value = metrics {
             value.processedBytes = Int64(Double(value.totalBytes) * (fraction ?? 0))
             let files = number(in: line, pattern: #"^\d+%\s+(\d+)(?=$|\s)"#) ?? 0
             value.completedFiles = min(value.totalFiles, max(value.completedFiles, files))
             metrics = value
+        }
+        return snapshot(now: now)
+    }
+
+    private mutating func parseReadProgress(_ line: String, now: TimeInterval) -> EngineProgress? {
+        let parts = line.split(separator: "\t", omittingEmptySubsequences: false)
+        guard parts.count == 7 else { return nil }
+        let values = parts.dropFirst(2).compactMap { Int64($0) }
+        guard values.count == 5, values.allSatisfy({ $0 >= 0 }),
+            values[0] <= values[1], values[2] <= values[3]
+        else { return nil }
+        let phase = parts[1]
+        switch phase {
+        case "preparing": message = "正在读取归档索引…"
+        case "storage": message = "正在校验数据卷、恢复卷和索引…"
+        case "extracting": message = "正在解压并校验文件…"
+        case "checking": message = "正在校验文件内容和属性…"
+        case "attributes": message = "文件解压完成，正在恢复属性…"
+        case "publishing": message = "正在保存解压结果…"
+        case "completed": message = readOperation?.completionMessage ?? "处理完成"
+        default: return nil
+        }
+        recoveryRead = true
+        if phase == "storage" { reportsFiles = false }
+        if phase == "extracting" || phase == "checking" { reportsFiles = true }
+        var value = ProcessingMetrics(totalBytes: values[1], totalFiles: reportsFiles ? values[3] : nil)
+        value.processedBytes = values[0]
+        value.completedFiles = values[2]
+        if values[4] > 0 { value.bytesPerSecond = Double(values[0]) * 1000 / Double(values[4]) }
+        processing = phase == "preparing" ? nil : value
+        switch phase {
+        case "completed": fraction = 1
+        case "storage", "extracting", "checking":
+            // Reserve completion for the result: hashes, attributes and publishing can still fail.
+            fraction = value.totalBytes > 0 ? min(0.99, Double(value.processedBytes) / Double(value.totalBytes)) : 0
+        default: fraction = nil
         }
         return snapshot(now: now)
     }
@@ -118,10 +194,14 @@ struct EngineProgressParser {
             }
             metrics = value
         }
-        let update = EngineProgress(fraction: fraction, message: message, compression: metrics)
+        if var value = processing, !recoveryRead, let startedAt, now > startedAt, value.processedBytes > 0 {
+            value.bytesPerSecond = Double(value.processedBytes) / (now - startedAt)
+            processing = value
+        }
+        let update = EngineProgress(fraction: fraction, message: message, compression: metrics, processing: processing)
         guard
             lastProgress?.fraction != update.fraction || lastProgress?.message != update.message
-                || lastProgress?.compression != update.compression
+                || lastProgress?.compression != update.compression || lastProgress?.processing != update.processing
         else { return nil }
         lastProgress = update
         return update

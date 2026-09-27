@@ -118,7 +118,7 @@ void write_entries(Writer& w, const std::vector<Entry>& entries) {
         for (const auto& f : e.frames) { w.u64(f.offset); w.u32(f.stored); w.u32(f.plain); }
     }
 }
-std::vector<Entry> read_entries(Reader& r, uint64_t stream_size, uint64_t initial_offset) {
+std::vector<Entry> read_entries(Reader& r, uint64_t stream_size, uint64_t initial_offset, uint64_t max_output) {
     const auto& b = r.b;
     std::vector<Entry> result;
     auto entries = r.u32();
@@ -140,7 +140,7 @@ std::vector<Entry> read_entries(Reader& r, uint64_t stream_size, uint64_t initia
         }
         paths.emplace(e.path, e.directory);
         e.size = r.u64(); r.raw(e.digest.data(), 32);
-        if (e.size > MaxOutput - output_size) throw std::runtime_error("Output exceeds 64 GiB limit");
+        if (e.size > max_output - output_size) throw std::runtime_error("Output exceeds profile content limit");
         output_size += e.size;
         auto frames = r.u32();
         if (frames > (b.size() - r.p) / 16 || frames != (e.size + FrameSize - 1) / FrameSize)

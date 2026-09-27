@@ -75,7 +75,7 @@ struct ArchiveBrowser: View {
                 )
                 .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 if let recovery = listing.recoveryDetails {
-                    if recovery.profile == 4, let size = recovery.volumeSizeBytes,
+                    if recovery.hasCountedVolumes, let size = recovery.volumeSizeBytes,
                         let losses = recovery.toleratedVolumeLosses
                     {
                         Text(

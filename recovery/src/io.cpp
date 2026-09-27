@@ -3,6 +3,7 @@
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#include <limits>
 #include <stdexcept>
 #include <sys/stat.h>
 #include <sys/random.h>
@@ -22,7 +23,7 @@ static void io_error(const std::string& action) { throw std::runtime_error(actio
 File::File(const fs::path& path, Mode mode, bool optional) {
     check_cancel();
     int flags = O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
-    flags |= mode == Mode::New ? O_WRONLY | O_CREAT | O_EXCL : mode == Mode::Append ? O_WRONLY | O_APPEND : O_RDONLY;
+    flags |= mode == Mode::New ? O_WRONLY | O_CREAT | O_EXCL : mode == Mode::Append ? O_WRONLY | O_APPEND : mode == Mode::Update ? O_WRONLY : O_RDONLY;
     fd_ = ::open(path.c_str(), flags, 0600);
     if (fd_ < 0) {
         if (optional && errno == ENOENT) return;
@@ -59,6 +60,26 @@ void File::append(const void* data, size_t size) {
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) io_error("Write failed");
         p += n; size -= static_cast<size_t>(n);
+    }
+}
+void File::write(uint64_t offset, const void* data, size_t size) {
+    constexpr auto maximum = static_cast<uint64_t>(std::numeric_limits<off_t>::max());
+    if (offset > maximum || size > maximum - offset) throw std::runtime_error("File write exceeds supported offset");
+    auto* p = static_cast<const uint8_t*>(data);
+    while (size) {
+        check_cancel();
+        auto n = ::pwrite(fd_, p, size, static_cast<off_t>(offset));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) io_error("Positional write failed");
+        p += n; size -= static_cast<size_t>(n); offset += static_cast<uint64_t>(n);
+    }
+}
+void File::resize(uint64_t size) {
+    if (size > static_cast<uint64_t>(std::numeric_limits<off_t>::max())) throw std::runtime_error("File size exceeds supported offset");
+    for (;;) {
+        check_cancel();
+        if (::ftruncate(fd_, static_cast<off_t>(size)) == 0) return;
+        if (errno != EINTR) io_error("Cannot resize file");
     }
 }
 void File::sync() { if (::fsync(fd_) != 0) io_error("File sync failed"); }

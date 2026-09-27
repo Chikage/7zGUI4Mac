@@ -14,6 +14,7 @@ struct RecoveryOptions {
     RecoveryMode mode = RecoveryMode::Percent;
     uint64_t value = 2000; // hundredths of a percent, or requested payload bytes
     uint32_t data_volumes = 10, recovery_volumes = 2;
+    uint32_t profile = 0; // Creation selector only; zero preserves legacy defaults.
 };
 struct CodingGroup {
     uint32_t k = 0, m = 0;
@@ -43,6 +44,9 @@ struct ConfigurableManifest {
     SecurityInfo security;
     bool unlocked = true;
     bool directory_damaged = false; // Runtime-only state; never serialized.
+    uint64_t metadata_bytes_per_volume = 0; // Profile 5 physical envelope/index allocation.
+    uint64_t content_limit = MaxOutput;
+    Bytes authentication_bytes; // Parsed Profile 5 bootstrap with its MAC zeroed.
     uint32_t volume_count(bool parity) const;
     uint64_t payload_size(bool parity, uint32_t volume) const;
 };
@@ -64,7 +68,7 @@ std::string configurable_volume_name(bool parity, uint32_t index);
 bool uses_configurable_profile(const fs::path& directory);
 void create_configurable_archive(const InputPlan& plan, const fs::path& output, const RecoveryOptions& options, const SecurityOptions* security = nullptr, bool report_progress = false, uint32_t threads = 0);
 ConfigurableManifest list_configurable_archive(const fs::path& directory, const Password* password = nullptr);
-Verification verify_configurable_archive(const fs::path& directory, const Password* password = nullptr);
+Verification verify_configurable_archive(const fs::path& directory, const Password* password = nullptr, ReadProgress* progress = nullptr);
 void repair_configurable_archive(const fs::path& directory, const fs::path& output);
-ExtractionReport extract_configurable_archive(const fs::path& directory, const fs::path& output, const Password* password = nullptr, bool restore_attributes = true);
+ExtractionReport extract_configurable_archive(const fs::path& directory, const fs::path& output, const Password* password = nullptr, bool restore_attributes = true, ReadProgress* progress = nullptr);
 }
