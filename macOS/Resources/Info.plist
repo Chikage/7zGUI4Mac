@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>7-Zip for Mac</string>
+    <key>CFBundleDisplayName</key><string>7-Zip for Mac</string>
+    <key>CFBundleIdentifier</key><string>io.chikage.SevenZipMac</string>
+    <key>CFBundleExecutable</key><string>SevenZipMac</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>1.5.0</string>
+    <key>CFBundleVersion</key><string>6</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
+    <key>CFBundleLocalizations</key><array><string>zh_CN</string></array>
+    <key>NSHumanReadableCopyright</key><string>Community GUI: LGPL v3. 7-Zip engine © 1999–2026 Igor Pavlov: LGPL 2.1+ with additional conditions. See bundled licenses.</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>可恢复 RZ 归档</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Owner</string>
+            <key>LSItemContentTypes</key><array><string>io.chikage.recovery-archive</string></array>
+            <key>LSTypeIsPackage</key><true/>
+            <key>CFBundleTypeIconFile</key><string>AppIcon</string>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>RZ 归档分卷</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>CFBundleTypeExtensions</key><array><string>rzv</string><string>rzr</string><string>rzm</string></array>
+            <key>CFBundleTypeIconFile</key><string>AppIcon</string>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>7-Zip Archive</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>CFBundleTypeExtensions</key>
+            <array><string>7z</string><string>zip</string><string>rar</string><string>tar</string><string>gz</string><string>bz2</string><string>xz</string><string>tgz</string><string>tbz</string><string>txz</string><string>iso</string><string>cab</string><string>wim</string><string>zst</string><string>001</string></array>
+            <key>CFBundleTypeIconFile</key><string>AppIcon</string>
+        </dict>
+    </array>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key><string>io.chikage.recovery-archive</string>
+            <key>UTTypeDescription</key><string>可恢复 RZ 归档包</string>
+            <key>UTTypeConformsTo</key><array><string>com.apple.package</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict><key>public.filename-extension</key><array><string>rz</string></array></dict>
+            <key>UTTypeIconFile</key><string>AppIcon</string>
+        </dict>
+    </array>
+</dict>
+</plist>
