@@ -106,7 +106,7 @@ final class AppStore {
     private var task: Task<Void, Never>?
     private let service: ArchiveService
     private let defaults: UserDefaults
-    var isBusy: Bool { operation != nil }
+    var isBusy: Bool { operation != nil || files.transfer.isRunning }
     var isBrowsingArchive: Bool {
         if case .archive = browserHistory.current { return true }
         return false
@@ -374,6 +374,7 @@ final class AppStore {
     }
 
     func cancel() {
+        files.transfer.cancel()
         operation?.cancelling = true
         operation?.detail = "正在取消并清理临时文件…"
         task?.cancel()

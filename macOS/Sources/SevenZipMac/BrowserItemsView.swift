@@ -63,6 +63,7 @@ struct BrowserItemsView<MenuContent: View>: View {
     let searchActive: Bool
     let open: (Set<String>) -> Void
     var preview: ((Set<String>) -> Bool)? = nil
+    var cutPaths: Set<String> = []
     @ViewBuilder let menu: (Set<String>) -> MenuContent
     @AppStorage("browserLayout") private var layout: BrowserLayout = .details
     @AppStorage("browserShowsCheckboxes") private var showsCheckboxes = false
@@ -93,7 +94,9 @@ struct BrowserItemsView<MenuContent: View>: View {
                                 return comparator
                             }
                         }
-                    } label: { Label("排序", systemImage: "arrow.up.arrow.down") }
+                    } label: {
+                        Label("排序", systemImage: "arrow.up.arrow.down")
+                    }
                     .menuStyle(.borderlessButton).fixedSize()
                 }
                 Button("全选") { selection = Set(entries.map(\.id)) }
@@ -135,7 +138,8 @@ struct BrowserItemsView<MenuContent: View>: View {
                     ContentUnavailableView(
                         searchActive ? "没有匹配的文件" : "文件夹为空",
                         systemImage: searchActive ? "magnifyingglass" : "folder",
-                        description: Text(searchActive ? "尝试其他名称。" : "此位置没有可显示的项目。"))
+                        description: Text(searchActive ? "尝试其他名称。" : "此位置没有可显示的项目。")
+                    )
                     .allowsHitTesting(false)
                 }
             }
@@ -186,6 +190,7 @@ struct BrowserItemsView<MenuContent: View>: View {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: layout.cellWidth), spacing: 8)], spacing: 8) {
                         ForEach(rows) { entry in
                             gridCell(entry)
+                                .opacity(cutPaths.contains(entry.id) ? 0.5 : 1)
                                 .id(entry.id)
                                 .background { mouseTarget(entry) }
                                 .onTapGesture(count: 2) {
@@ -207,7 +212,10 @@ struct BrowserItemsView<MenuContent: View>: View {
                         }
                     }.padding(16)
                     Color.clear.frame(maxWidth: .infinity, minHeight: 40)
-                        .contentShape(Rectangle()).onTapGesture { selection = []; gridFocused = true }
+                        .contentShape(Rectangle()).onTapGesture {
+                            selection = []
+                            gridFocused = true
+                        }
                 }
                 .contextMenu { menu([]) }
                 .focusable().focused($gridFocused)
@@ -231,8 +239,14 @@ struct BrowserItemsView<MenuContent: View>: View {
                     proxy.scrollTo(id)
                     return .handled
                 }
-                .onKeyPress(.return) { open(selection); return .handled }
-                .onKeyPress(.escape) { selection = []; return .handled }
+                .onKeyPress(.return) {
+                    open(selection)
+                    return .handled
+                }
+                .onKeyPress(.escape) {
+                    selection = []
+                    return .handled
+                }
                 .onKeyPress(characters: CharacterSet(charactersIn: "a")) { press in
                     guard press.modifiers.contains(.command) else { return .ignored }
                     selection = Set(rows.map(\.id))
@@ -265,8 +279,10 @@ struct BrowserItemsView<MenuContent: View>: View {
                     }
             }
         }
-        .background(selection.contains(entry.id) ? Color.accentColor.opacity(0.18) : .clear,
-                    in: RoundedRectangle(cornerRadius: 8))
+        .background(
+            selection.contains(entry.id) ? Color.accentColor.opacity(0.18) : .clear,
+            in: RoundedRectangle(cornerRadius: 8)
+        )
         .overlay {
             RoundedRectangle(cornerRadius: 8)
                 .strokeBorder(selection.contains(entry.id) ? Color.accentColor : .clear, lineWidth: 1)
@@ -279,18 +295,25 @@ struct BrowserItemsView<MenuContent: View>: View {
         HStack(spacing: 8) {
             if showsCheckboxes { checkbox(entry) }
             BrowserEntryLabel(entry: entry, size: size, showsPath: showsPath)
+                .opacity(cutPaths.contains(entry.id) ? 0.5 : 1)
+            if cutPaths.contains(entry.id) {
+                Image(systemName: "scissors").font(.caption).foregroundStyle(.secondary).accessibilityLabel("待移动")
+            }
         }
     }
 
     private func checkbox(_ entry: BrowserEntry) -> some View {
-        Toggle("选择 \(entry.name)", isOn: Binding(
-            get: { selection.contains(entry.id) },
-            set: { selected in
-                if selected { selection.insert(entry.id) } else { selection.remove(entry.id) }
-                anchor = entry.id
-                cursor = entry.id
-            }
-        ))
+        Toggle(
+            "选择 \(entry.name)",
+            isOn: Binding(
+                get: { selection.contains(entry.id) },
+                set: { selected in
+                    if selected { selection.insert(entry.id) } else { selection.remove(entry.id) }
+                    anchor = entry.id
+                    cursor = entry.id
+                }
+            )
+        )
         .toggleStyle(.checkbox).labelsHidden()
         .help("选择或取消选择“\(entry.name)”")
         .padding(4)
@@ -304,8 +327,9 @@ struct BrowserItemsView<MenuContent: View>: View {
     private func select(_ id: String, modifiers: NSEvent.ModifierFlags) {
         cursor = id
         if modifiers.contains(.shift), let anchor,
-           let start = rows.firstIndex(where: { $0.id == anchor }),
-           let end = rows.firstIndex(where: { $0.id == id }) {
+            let start = rows.firstIndex(where: { $0.id == anchor }),
+            let end = rows.firstIndex(where: { $0.id == id })
+        {
             selection = Set(rows[min(start, end)...max(start, end)].map(\.id))
         } else if modifiers.contains(.command) {
             if selection.contains(id) { selection.remove(id) } else { selection.insert(id) }

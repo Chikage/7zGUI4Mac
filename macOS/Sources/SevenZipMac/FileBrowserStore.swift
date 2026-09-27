@@ -10,7 +10,10 @@ final class FileBrowserStore {
     var search = ""
     var showHidden = false
     var isLoading = false
-    var isMutating = false
+    private var mutating = false
+    let clipboard: FileClipboard
+    let transfer = FileTransferStore()
+    var isMutating: Bool { mutating || transfer.isRunning }
     var errorMessage: String?
     var directoryError: String?
     var treeChildren: [String: [BrowserEntry]] = [:]
@@ -20,6 +23,27 @@ final class FileBrowserStore {
     private var generation = 0
     private var treeGeneration = 0
     private let service = FileBrowserService()
+
+    init(clipboard: FileClipboard = FileClipboard()) { self.clipboard = clipboard }
+
+    func copySelection(_ ids: Set<String>, kind: FileTransferKind) {
+        guard !isLoading, !isMutating else { return }
+        clipboard.write(entries.filter { ids.contains($0.id) }.compactMap(\.url), kind: kind)
+    }
+
+    func paste() {
+        guard !isLoading, !isMutating, directoryError == nil, let snapshot = clipboard.snapshot() else { return }
+        let destination = directory
+        transfer.start(snapshot, to: destination) { [self] result in
+            clipboard.finish(snapshot, completed: result.completedSources)
+            await load(directory, preserveSelection: true)
+            if directory == destination {
+                let names = Set(result.destinations.map(\.lastPathComponent))
+                selection = Set(entries.filter { names.contains($0.name) }.map(\.id))
+            }
+            refresh()
+        }
+    }
 
     var home: URL { FileManager.default.homeDirectoryForCurrentUser }
     var canGoUp: Bool { directory.path != "/" }
@@ -92,8 +116,8 @@ final class FileBrowserStore {
 
     private func mutate(_ action: () async throws -> URL?) async -> Bool {
         guard !isMutating else { return false }
-        isMutating = true
-        defer { isMutating = false }
+        mutating = true
+        defer { mutating = false }
         do {
             let result = try await action()
             await load(directory, preserveSelection: true)

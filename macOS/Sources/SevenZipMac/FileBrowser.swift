@@ -55,7 +55,8 @@ struct FileBrowser: View {
                 } else {
                     BrowserItemsView(
                         entries: visibleEntries, selection: $files.selection,
-                        searchActive: !files.search.isEmpty, open: open, preview: preview
+                        searchActive: !files.search.isEmpty, open: open, preview: preview,
+                        cutPaths: files.clipboard.cutPaths
                     ) { ids in
                         contextMenu(ids)
                     }
@@ -75,12 +76,22 @@ struct FileBrowser: View {
                 Text("\(visibleEntries.count) 个项目")
                 if !files.selection.isEmpty { Text("· 已选择 \(files.selection.count) 项") }
                 Spacer()
-                Text("双击文件夹或压缩包以浏览 · 空格预览")
+                if !files.clipboard.cutPaths.isEmpty {
+                    Text("已剪切 \(files.clipboard.cutPaths.count) 项 · 到目标文件夹粘贴")
+                } else {
+                    Text("双击文件夹或压缩包以浏览 · 空格预览")
+                }
             }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 16).padding(.vertical, 10)
         }
         .task {
+            files.clipboard.refresh()
             await files.loadIfNeeded()
             address = files.directory.path
+            // NSPasteboard has no change notification. Read URLs only when its change count changes.
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(500)) } catch { break }
+                files.clipboard.refresh()
+            }
         }
         .quickLookPreview($previewURL, in: previewURLs)
         .onChange(of: files.directory) { _, url in
@@ -95,7 +106,22 @@ struct FileBrowser: View {
         .onDisappear { closePreview() }
         .onChange(of: files.showHidden) { files.refresh() }
         .onChange(of: activeState) { _, value in
-            if value != .inactive { files.refresh() }
+            if value != .inactive {
+                files.clipboard.refresh()
+                files.refresh()
+            }
+        }
+        .onCommand(#selector(NSText.copy(_:))) {
+            guard !store.isBusy else { return }
+            files.copySelection(files.selection, kind: .copy)
+        }
+        .onCommand(#selector(NSText.cut(_:))) {
+            guard !store.isBusy else { return }
+            files.copySelection(files.selection, kind: .move)
+        }
+        .onCommand(#selector(NSText.paste(_:))) {
+            guard !store.isBusy else { return }
+            files.paste()
         }
         .sheet(item: $edit) { item in
             FileNameSheet(edit: item, files: files)
@@ -152,6 +178,28 @@ struct FileBrowser: View {
     private var commandBar: some View {
         HStack(spacing: 14) {
             Button {
+                files.copySelection(files.selection, kind: .copy)
+            } label: {
+                Label("复制", systemImage: "doc.on.doc")
+            }.disabled(files.selection.isEmpty || store.isBusy || files.isMutating || files.isLoading)
+                .help("复制所选项目 ⌘C")
+            Button {
+                files.copySelection(files.selection, kind: .move)
+            } label: {
+                Label("剪切", systemImage: "scissors")
+            }.disabled(files.selection.isEmpty || store.isBusy || files.isMutating || files.isLoading)
+                .help("剪切所选项目 ⌘X，粘贴完成后移动源文件")
+            Button {
+                files.paste()
+            } label: {
+                Label("粘贴", systemImage: "doc.on.clipboard")
+            }.disabled(
+                !files.clipboard.hasFiles || store.isBusy || files.isMutating || files.isLoading
+                    || files.directoryError != nil
+            )
+            .help("粘贴到当前文件夹 ⌘V")
+            Divider().frame(height: 16)
+            Button {
                 edit = FileNameEdit(directory: files.directory)
             } label: {
                 Label("新建文件夹", systemImage: "folder.badge.plus")
@@ -189,6 +237,13 @@ struct FileBrowser: View {
     @ViewBuilder private func contextMenu(_ ids: Set<String>) -> some View {
         let selected = files.entries.filter { ids.contains($0.id) }
         let urls = selected.compactMap(\.url)
+        Button("复制") { files.copySelection(ids, kind: .copy) }
+            .disabled(urls.isEmpty || store.isBusy || files.isMutating)
+        Button("剪切") { files.copySelection(ids, kind: .move) }
+            .disabled(urls.isEmpty || store.isBusy || files.isMutating)
+        Button("粘贴到当前文件夹") { files.paste() }
+            .disabled(!files.clipboard.hasFiles || store.isBusy || files.isMutating || files.directoryError != nil)
+        Divider()
         if let entry = selected.first, selected.count == 1, let url = entry.url {
             Button(entry.isDirectory ? "打开文件夹" : entry.isArchive ? "打开压缩包" : "打开") { open([entry.id]) }
                 .disabled(entry.isArchive && store.isBusy)

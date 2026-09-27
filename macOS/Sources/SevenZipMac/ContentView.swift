@@ -50,6 +50,11 @@ struct ContentView: View {
         .sheet(isPresented: $store.showRepair) { RepairArchiveSheet(store: store) }
         .sheet(isPresented: $store.showPassword) { PasswordSheet(store: store) }
         .sheet(isPresented: $store.showKeyFile) { RecoveryKeyFileSheet(store: store) }
+        .sheet(
+            isPresented: Binding(
+                get: { store.files.transfer.isPresented }, set: { store.files.transfer.isPresented = $0 }
+            )
+        ) { FileTransferView(transfer: store.files.transfer) }
         .alert(
             store.errorMessage == nil && store.metadataWarningMessage != nil ? "部分属性未恢复" : "操作未完成",
             isPresented: Binding(
