@@ -48,6 +48,7 @@ struct ContentView: View {
         .sheet(isPresented: $store.showCreate) { CreateArchiveSheet(store: store) }
         .sheet(isPresented: $store.showExtract) { ExtractSheet(store: store) }
         .sheet(isPresented: $store.showRepair) { RepairArchiveSheet(store: store) }
+        .sheet(isPresented: $store.showRARTools) { RARToolsSheet(store: store) }
         .sheet(isPresented: $store.showPassword) { PasswordSheet(store: store) }
         .sheet(isPresented: $store.showKeyFile) { RecoveryKeyFileSheet(store: store) }
         .sheet(
@@ -126,6 +127,11 @@ struct ContentView: View {
                 Label("新建", systemImage: "plus")
             }
             .help("新建压缩包 ⌘N").disabled(store.isBusy)
+            Menu {
+                Button("RAR 工具…") { store.beginRARTools() }
+            } label: {
+                Label("工具", systemImage: "wrench.and.screwdriver")
+            }.disabled(store.isBusy)
             if store.page == .files && store.isBrowsingArchive {
                 Divider()
                 Button {

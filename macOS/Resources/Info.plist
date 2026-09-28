@@ -7,8 +7,8 @@
     <key>CFBundleIdentifier</key><string>io.chikage.SevenZipMac</string>
     <key>CFBundleExecutable</key><string>SevenZipMac</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.5.0</string>
-    <key>CFBundleVersion</key><string>6</string>
+    <key>CFBundleShortVersionString</key><string>1.6.0</string>
+    <key>CFBundleVersion</key><string>7</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
@@ -18,6 +18,13 @@
     <key>NSHumanReadableCopyright</key><string>Community GUI: LGPL v3. 7-Zip engine © 1999–2026 Igor Pavlov: LGPL 2.1+ with additional conditions. See bundled licenses.</string>
     <key>CFBundleDocumentTypes</key>
     <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>RAR 恢复卷与旧式分卷</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>CFBundleTypeExtensions</key><array><string>rev</string><string>r00</string><string>r01</string></array>
+            <key>CFBundleTypeIconFile</key><string>AppIcon</string>
+        </dict>
         <dict>
             <key>CFBundleTypeName</key><string>可恢复 RZ 归档</string>
             <key>CFBundleTypeRole</key><string>Editor</string>

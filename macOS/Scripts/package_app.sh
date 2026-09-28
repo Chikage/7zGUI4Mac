@@ -14,6 +14,10 @@ if [[ -z "${RECOVERY_ENGINE:-}" ]]; then
 fi
 RZ_ENGINE="${RECOVERY_ENGINE:-$PROJECT_ROOT/build/recovery/rz}"
 [[ -x "$RZ_ENGINE" ]] || { echo "Missing recovery engine: $RZ_ENGINE" >&2; exit 1; }
+RAR_DIR="$PROJECT_ROOT/Vendor/rar"
+for RAR_FILE in rar unrar default.sfx; do
+    [[ -x "$RAR_DIR/$RAR_FILE" ]] || { echo "Missing RAR component: $RAR_FILE" >&2; exit 1; }
+done
 mkdir -p "$PROJECT_ROOT/build"
 BINARIES=()
 for ARCH in "${ARCH_LIST[@]}"; do
@@ -31,6 +35,10 @@ else
 fi
 cp "$ENGINE" "$APP/Contents/MacOS/7zz"
 cp "$RZ_ENGINE" "$APP/Contents/MacOS/rz"
+cp "$RAR_DIR/rar" "$RAR_DIR/unrar" "$RAR_DIR/default.sfx" "$APP/Contents/MacOS/"
+mkdir -p "$APP/Contents/Resources/RAR"
+cp "$RAR_DIR/"*.txt "$RAR_DIR/order.htm" "$RAR_DIR/rarfiles.lst" "$RAR_DIR/PROVENANCE.md" "$APP/Contents/Resources/RAR/"
+cp "$PROJECT_ROOT/docs/RAR.md" "$APP/Contents/Resources/RAR/GUI.md"
 cp "$PROJECT_ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 cp "$PROJECT_ROOT/Vendor/7zip/License.txt" "$APP/Contents/Resources/7zip-License.txt"
 cp "$PROJECT_ROOT/../LICENSE" "$APP/Contents/Resources/LGPL.txt"
@@ -63,6 +71,9 @@ SIGN_FLAGS=(--force --sign "$IDENTITY")
 if [[ "$IDENTITY" != "-" ]]; then SIGN_FLAGS+=(--options runtime --timestamp); fi
 codesign "${SIGN_FLAGS[@]}" "$APP/Contents/MacOS/7zz"
 codesign "${SIGN_FLAGS[@]}" "$APP/Contents/MacOS/rz"
+codesign "${SIGN_FLAGS[@]}" "$APP/Contents/MacOS/rar"
+codesign "${SIGN_FLAGS[@]}" "$APP/Contents/MacOS/unrar"
+codesign "${SIGN_FLAGS[@]}" "$APP/Contents/MacOS/default.sfx"
 codesign "${SIGN_FLAGS[@]}" "$APP"
 codesign --verify --deep --strict "$APP"
 plutil -lint "$APP/Contents/Info.plist"

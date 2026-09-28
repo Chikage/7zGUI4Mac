@@ -36,6 +36,7 @@ struct SevenZipMacApp: App {
                     .disabled(store.listing == nil || store.isBusy)
                 Button("修复归档…") { store.requestRepair() }
                     .disabled(store.listing?.supportsRecovery != true || store.isBusy)
+                Button("RAR 工具…") { store.beginRARTools() }.disabled(store.isBusy)
                 Divider()
                 Button("在 Finder 中显示") {
                     if let url = store.listing?.url { NSWorkspace.shared.activateFileViewerSelecting([url]) }
@@ -49,6 +50,16 @@ struct SevenZipMacApp: App {
                 }
                 Button("开源许可证") {
                     if let url = Bundle.main.url(forResource: "7zip-License", withExtension: "txt") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                Button("RAR 参数与使用说明") {
+                    if let url = Bundle.main.url(forResource: "rar", withExtension: "txt", subdirectory: "RAR") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                Button("RAR 许可证") {
+                    if let url = Bundle.main.url(forResource: "license", withExtension: "txt", subdirectory: "RAR") {
                         NSWorkspace.shared.open(url)
                     }
                 }

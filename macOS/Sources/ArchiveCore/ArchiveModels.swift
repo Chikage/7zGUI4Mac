@@ -63,13 +63,15 @@ public struct ArchiveListing: Sendable {
         }
     }
     public var isEncrypted: Bool { archiveEncrypted || entries.contains(where: \.isEncrypted) }
-    public var supportsRecovery: Bool { format == "RZ" }
+    public var isRAR: Bool { format.lowercased().hasPrefix("rar") }
+    public var supportsRecovery: Bool { format == "RZ" || isRAR }
 }
 
 public enum ArchiveFormat: String, CaseIterable, Identifiable, Sendable {
     case sevenZip = "7z"
     case zip = "zip"
     case tar = "tar"
+    case rar = "rar"
     case recovery = "rz"
     public var id: String { rawValue }
     public var title: String {
@@ -79,13 +81,14 @@ public enum ArchiveFormat: String, CaseIterable, Identifiable, Sendable {
         default: rawValue.uppercased()
         }
     }
-    public var supportsPassword: Bool { self == .sevenZip || self == .zip || self == .recovery }
+    public var supportsPassword: Bool { self != .tar }
     public var supportsCompressionLevel: Bool { self == .sevenZip || self == .zip }
     public var explanation: String {
         switch self {
         case .sevenZip: "7z 使用 LZMA2 压缩，适合追求更小体积。"
         case .zip: "ZIP 便于跨平台分享；加密 ZIP 需要支持 AES 的解压软件。"
         case .tar: "TAR 仅打包文件，不压缩，也不支持密码。"
+        case .rar: "RAR 支持分卷、AES-256 加密、恢复记录和 REV 恢复卷。"
         case .recovery: "生成带恢复卷的归档包，适合需要防损坏的资料保存。此实验格式仅本应用支持。"
         }
     }
@@ -121,13 +124,15 @@ public struct CompressionOptions: Sendable {
     public var preserveMetadata: Bool
     public var recoveryEncryption: RecoveryEncryption
     public var generateRecoveryKeyFile: Bool
+    public var rar: RAROptions
     public init(
         format: ArchiveFormat = .sevenZip, level: Int = 5,
         password: String = "", encryptNames: Bool = true,
         recoveryVolumeSizeBytes: Int64 = 64 * 1024 * 1024,
         recoveryPayload: RecoveryPayload = .percentage(basisPoints: 2000), preserveMetadata: Bool = true,
         recoveryEncryption: RecoveryEncryption = .standard, generateRecoveryKeyFile: Bool = false,
-        recoveryVolumeCounts: RecoveryVolumeCounts? = nil, countedRecoveryProfile: CountedRecoveryProfile = .paged
+        recoveryVolumeCounts: RecoveryVolumeCounts? = nil, countedRecoveryProfile: CountedRecoveryProfile = .paged,
+        rar: RAROptions = RAROptions()
     ) {
         self.format = format
         self.level = level
@@ -140,6 +145,7 @@ public struct CompressionOptions: Sendable {
         self.preserveMetadata = preserveMetadata
         self.recoveryEncryption = recoveryEncryption
         self.generateRecoveryKeyFile = generateRecoveryKeyFile
+        self.rar = rar
     }
 }
 
@@ -216,6 +222,8 @@ public struct CompressionMetrics: Sendable, Equatable {
 public enum ArchiveError: LocalizedError, Sendable {
     case engineMissing
     case recoveryEngineMissing
+    case rarEngineMissing
+    case rarFailed(Int32, String)
     case recoveryEngineFailed(Int32, String)
     case recoveryRepairable
     case recoveryUnrecoverable
@@ -231,6 +239,8 @@ public enum ArchiveError: LocalizedError, Sendable {
         switch self {
         case .engineMissing: "找不到 7-Zip 内核，请使用 Scripts/package_app.sh 重新打包应用。"
         case .recoveryEngineMissing: "找不到可恢复归档内核，请使用 Scripts/package_app.sh 重新打包应用。"
+        case .rarEngineMissing: "找不到 RAR 内核，请使用 Scripts/package_app.sh 重新打包应用。"
+        case .rarFailed(let code, let detail): "RAR 操作失败（\(code)）。\n\(detail)"
         case .recoveryEngineFailed(let code, let detail): "可恢复归档操作失败（\(code)）。\n\(detail)"
         case .recoveryRepairable: "归档存在损坏、缺卷或索引副本缺失，仍可恢复。请点击“修复归档”生成完整副本。"
         case .recoveryUnrecoverable: "归档的部分数据超过恢复能力，无法完整修复。请补回缺失的分卷或恢复卷后重试。"

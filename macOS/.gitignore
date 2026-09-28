@@ -1,4 +1,9 @@
 .build/
 .swiftpm/
 build/
-.DS_Store
+
+# Xcode local state and generated results
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xcresult/

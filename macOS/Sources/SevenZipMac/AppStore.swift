@@ -95,6 +95,9 @@ final class AppStore {
     var showCreate = false
     var showExtract = false
     var showRepair = false
+    var showRARTools = false
+    var rarToolSource: URL?
+    var rarToolOperation: RARToolOperation = .repair
     var showPassword = false
     var passwordError: String?
     var createSources: [URL] = []
@@ -123,7 +126,9 @@ final class AppStore {
         let recoveryExecutable =
             Bundle.main.url(forAuxiliaryExecutable: "rz")
             ?? workingDirectory.appendingPathComponent("build/recovery/rz")
-        service = ArchiveService(executable: executable, recoveryExecutable: recoveryExecutable)
+        let rarExecutable = Bundle.main.url(forAuxiliaryExecutable: "rar")
+            ?? workingDirectory.appendingPathComponent("Vendor/rar/rar")
+        service = ArchiveService(executable: executable, recoveryExecutable: recoveryExecutable, rarExecutable: rarExecutable)
         if let data = defaults.data(forKey: "recentArchives"),
             let saved = try? JSONDecoder().decode([RecentArchive].self, from: data)
         {
@@ -170,6 +175,10 @@ final class AppStore {
         history: BrowserHistory<BrowserLocation>? = nil
     ) {
         guard canNavigateBrowser else { return }
+        if url.pathExtension.lowercased() == "rev" {
+            beginRARTools(url, operation: .reconstruct)
+            return
+        }
         start("打开归档", detail: url.lastPathComponent) { [self] in
             let result = try await service.list(url, password: password, keyFile: keyFile)
             listing = result
@@ -325,7 +334,26 @@ final class AppStore {
 
     func requestRepair() {
         guard !isBusy, listing?.supportsRecovery == true else { return }
+        if listing?.isRAR == true {
+            beginRARTools(listing?.url)
+            return
+        }
         showRepair = true
+    }
+
+    func beginRARTools(_ url: URL? = nil, operation: RARToolOperation = .repair) {
+        guard !isBusy else { return }
+        rarToolSource = url ?? (listing?.isRAR == true ? listing?.url : nil)
+        rarToolOperation = operation
+        showRARTools = true
+    }
+
+    func performRARTool(_ request: RARToolRequest, archive: URL, destination: URL) {
+        guard !isBusy else { return }
+        showRARTools = false
+        start("RAR：\(request.operation.title)", detail: archive.lastPathComponent) { [self] in
+            try await service.performRARTool(request, archive: archive, to: destination, progress: progressHandler())
+        }
     }
 
     func repair(to url: URL) {

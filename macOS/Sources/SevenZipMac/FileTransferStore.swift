@@ -79,8 +79,29 @@ final class FileClipboard {
 }
 
 struct TransferSpeedSample: Identifiable {
-    let id: TimeInterval
+    var id: Double { fraction }
+    let fraction: Double
     let bytesPerSecond: Double
+}
+
+/// Keep the whole transfer visible, with at most one endpoint per 0.1% progress bucket.
+struct TransferSpeedHistory {
+    private(set) var samples: [TransferSpeedSample] = []
+
+    mutating func record(fraction: Double, bytesPerSecond: Double) {
+        guard fraction.isFinite, bytesPerSecond.isFinite else { return }
+        let fraction = min(1, max(0, fraction))
+        guard fraction >= (samples.last?.fraction ?? 0) else { return }
+        let sample = TransferSpeedSample(fraction: fraction, bytesPerSecond: max(0, bytesPerSecond))
+        if samples.isEmpty { samples.append(TransferSpeedSample(fraction: 0, bytesPerSecond: 0)) }
+        if let last = samples.last,
+            last.fraction == fraction || (last.fraction > 0 && Int(last.fraction * 1_000) == Int(fraction * 1_000))
+        {
+            samples[samples.count - 1] = sample
+        } else {
+            samples.append(sample)
+        }
+    }
 }
 
 @MainActor @Observable
@@ -93,7 +114,8 @@ final class FileTransferStore {
     private(set) var isPaused = false
     private(set) var isCancelling = false
     private(set) var result: FileTransferResult?
-    private(set) var samples: [TransferSpeedSample] = []
+    private var speedHistory = TransferSpeedHistory()
+    var samples: [TransferSpeedSample] { speedHistory.samples }
     private(set) var bytesPerSecond: Double = 0
     private(set) var elapsed: TimeInterval = 0
     var isPresented = false
@@ -139,7 +161,7 @@ final class FileTransferStore {
         self.destination = destination
         progress = FileTransferProgress()
         result = nil
-        samples = []
+        speedHistory = TransferSpeedHistory()
         elapsed = 0
         bytesPerSecond = 0
         sampledBytes = 0
@@ -166,7 +188,7 @@ final class FileTransferStore {
             channel.continuation.finish()
             await reader.value
             ticker.cancel()
-            sampleSpeed()
+            sampleSpeed(completed: outcome.succeeded)
             result = outcome
             isPaused = false
             isCancelling = false
@@ -193,7 +215,7 @@ final class FileTransferStore {
         control.cancel()
     }
 
-    private func sampleSpeed() {
+    private func sampleSpeed(completed: Bool = false) {
         let now = ContinuousClock.now
         let interval = lastSample.duration(to: now)
         let seconds = Double(interval.components.seconds) + Double(interval.components.attoseconds) / 1e18
@@ -201,12 +223,16 @@ final class FileTransferStore {
         defer { sampledBytes = progress.copiedBytes }
         guard !isPaused, seconds > 0 else { return }
         elapsed += seconds
-        bytesPerSecond = Double(max(0, progress.copiedBytes - sampledBytes)) / seconds
-        guard progress.phase == .copying else {
+        let delta = max(0, progress.copiedBytes - sampledBytes)
+        if progress.phase == .copying || delta > 0 {
+            bytesPerSecond = Double(delta) / seconds
+        } else if completed {
+            bytesPerSecond = samples.last?.bytesPerSecond ?? 0
+        } else {
             bytesPerSecond = 0
-            return
         }
-        samples.append(TransferSpeedSample(id: elapsed, bytesPerSecond: bytesPerSecond))
-        if samples.count > 120 { samples.removeFirst(samples.count - 120) }
+        // Include the final data interval even if a short copy finished between timer ticks.
+        guard progress.copiedBytes > 0, let fraction = completed ? 1 : progress.fraction else { return }
+        speedHistory.record(fraction: fraction, bytesPerSecond: bytesPerSecond)
     }
 }

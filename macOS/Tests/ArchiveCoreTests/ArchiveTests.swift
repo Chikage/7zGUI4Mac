@@ -19,7 +19,9 @@ struct Fixture {
         let recoveryExecutable =
             ProcessInfo.processInfo.environment["RECOVERY_ENGINE"].map { URL(fileURLWithPath: $0) }
             ?? package.appendingPathComponent("build/recovery/rz")
-        service = ArchiveService(executable: executable, recoveryExecutable: recoveryExecutable)
+        let rarExecutable = ProcessInfo.processInfo.environment["RAR_ENGINE"].map { URL(fileURLWithPath: $0) }
+            ?? package.appendingPathComponent("Vendor/rar/rar")
+        service = ArchiveService(executable: executable, recoveryExecutable: recoveryExecutable, rarExecutable: rarExecutable)
     }
     func cleanup() { try? FileManager.default.removeItem(at: root) }
     func file(_ path: String, contents: String = "七个文件，打包成一份。\n") throws -> URL {
@@ -41,6 +43,7 @@ func roundTrip(format: ArchiveFormat) async throws {
     let archive = fixture.root.appendingPathComponent("result.\(format.rawValue)")
     _ = try await fixture.service.compress([source], to: archive, options: CompressionOptions(format: format))
     let listing = try await fixture.service.list(archive)
+    #expect(!listing.isEncrypted)
     #expect(listing.fileCount == 3)
     #expect(listing.entries.contains { $0.path == "资料 空格/子目录/你好.txt" })
     try await fixture.service.test(archive)
@@ -50,7 +53,7 @@ func roundTrip(format: ArchiveFormat) async throws {
     #expect(FileManager.default.fileExists(atPath: output.appendingPathComponent("资料 空格/-file[1]*?.txt").path))
 }
 
-@Test(arguments: [ArchiveFormat.sevenZip, .zip, .recovery])
+@Test(arguments: [ArchiveFormat.sevenZip, .zip, .recovery, .rar])
 func encryptedRoundTrip(format: ArchiveFormat) async throws {
     let fixture = try Fixture()
     defer { fixture.cleanup() }

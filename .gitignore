@@ -1,0 +1,20 @@
+# macOS filesystem metadata
+.DS_Store
+._*
+__MACOSX/
+
+# Generated logs
+*.log
+/help-src/_errorlog.txt
+
+# Local environment settings (keep shareable templates)
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Personal RAR registration files
+rarreg.key
+.rarreg.key
+.rarregkey

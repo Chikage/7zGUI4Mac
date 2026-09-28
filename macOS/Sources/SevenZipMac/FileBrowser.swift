@@ -253,6 +253,9 @@ struct FileBrowser: View {
                 if ["rz", "rzv", "rzr", "rzm"].contains(url.pathExtension.lowercased()) {
                     Button("修复归档…") { store.openArchive(url, action: .repair) }.disabled(store.isBusy)
                 }
+                if RARArchive.isRAR(url) {
+                    Button("RAR 工具 / 修复…") { store.beginRARTools(url) }.disabled(store.isBusy)
+                }
             }
             Divider()
             Button("重命名…") { edit = FileNameEdit(directory: files.directory, target: url) }

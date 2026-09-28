@@ -90,7 +90,7 @@ struct ArchiveBrowser: View {
                         )
                         .font(.caption).foregroundStyle(.secondary)
                     }
-                } else if listing.supportsRecovery {
+                } else if listing.format == "RZ" {
                     Text("旧版归档 · 固定 10+2 恢复配置").font(.caption).foregroundStyle(.secondary)
                 }
                 if listing.preservesMetadata {
@@ -104,7 +104,7 @@ struct ArchiveBrowser: View {
                 }
             }
             Spacer()
-            if listing.supportsRecovery || listing.isEncrypted {
+            if listing.format == "RZ" || listing.isEncrypted {
                 Label(
                     listing.isEncrypted ? "已加密" : "冗余恢复",
                     systemImage: listing.isEncrypted ? "lock" : "shield.checkered"
@@ -173,6 +173,9 @@ struct ArchiveBrowser: View {
         Button("测试完整性") { store.testArchive() }.disabled(store.isBusy)
         if store.listing?.supportsRecovery == true {
             Button("修复归档…") { store.requestRepair() }.disabled(store.isBusy)
+        }
+        if store.listing?.isRAR == true {
+            Button("RAR 工具…") { store.beginRARTools() }.disabled(store.isBusy)
         }
         Divider()
         Button("复制归档内路径") { copyBrowserPaths(ids.sorted()) }.disabled(ids.isEmpty)

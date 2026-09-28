@@ -3,12 +3,16 @@ import Foundation
 public actor ArchiveService {
     private let runner: ProcessRunner
     private let recovery: RecoveryArchiveService
+    private let rar: RARArchiveService
     private let fm = FileManager.default
 
-    public init(executable: URL, recoveryExecutable: URL? = nil) {
+    public init(executable: URL, recoveryExecutable: URL? = nil, rarExecutable: URL? = nil) {
         runner = ProcessRunner(executable: executable)
         recovery = RecoveryArchiveService(
             executable: recoveryExecutable ?? executable.deletingLastPathComponent().appendingPathComponent("rz"))
+        rar = RARArchiveService(
+            executable: rarExecutable ?? executable.deletingLastPathComponent().appendingPathComponent("rar"),
+            listingExecutable: executable)
     }
 
     public func supportsRecoveryAES() async throws -> Bool { try await recovery.supportsAES() }
@@ -18,6 +22,7 @@ public actor ArchiveService {
             return try await recovery.list(directory, password: password, keyFile: keyFile)
         }
         guard keyFile == nil else { throw ArchiveError.invalidInput("独立密钥文件仅适用于 RZ 归档。") }
+        if RARArchive.isRAR(url) { return try await rar.list(url, password: password) }
         try validatePassword(password)
         let result = try await runner.run(
             arguments: ["l", "-slt", "-sccUTF-8", "-bd", "--", url.path],
@@ -35,6 +40,10 @@ public actor ArchiveService {
             return
         }
         guard keyFile == nil else { throw ArchiveError.invalidInput("独立密钥文件仅适用于 RZ 归档。") }
+        if RARArchive.isRAR(url) {
+            try await rar.test(url, password: password, progress: progress)
+            return
+        }
         try validatePassword(password)
         progress(EngineProgress(message: "正在读取归档索引…"))
         let listing = try await list(url, password: password)
@@ -50,6 +59,9 @@ public actor ArchiveService {
         _ sources: [URL], to destination: URL, options: CompressionOptions,
         progress: @escaping @Sendable (EngineProgress) -> Void = { _ in }
     ) async throws -> URL {
+        if options.format == .rar {
+            return try await rar.compress(sources, to: destination, options: options, progress: progress)
+        }
         if options.format == .recovery {
             return try await recovery.compress(sources, to: destination, options: options, progress: progress)
         }
@@ -111,6 +123,9 @@ public actor ArchiveService {
             )
         }
         guard keyFile == nil else { throw ArchiveError.invalidInput("独立密钥文件仅适用于 RZ 归档。") }
+        if RARArchive.isRAR(url) {
+            return try await rar.extract(url, to: destination, password: password, progress: progress)
+        }
         try ensureNewDestination(destination)
         progress(EngineProgress(message: "正在检查归档路径…"))
         let listing = try await list(url, password: password)
@@ -144,6 +159,13 @@ public actor ArchiveService {
             throw ArchiveError.invalidInput("只有可恢复 RZ 归档支持此修复操作。")
         }
         return try await recovery.repair(directory, to: destination, progress: progress)
+    }
+
+    public func performRARTool(
+        _ request: RARToolRequest, archive: URL, to destination: URL,
+        progress: @escaping @Sendable (EngineProgress) -> Void = { _ in }
+    ) async throws -> URL {
+        try await rar.perform(request, archive: archive, to: destination, progress: progress)
     }
 
     private func validateExtractedTree(_ root: URL) throws {

@@ -45,7 +45,8 @@ public struct BrowserEntry: Identifiable, Hashable, Sendable {
     public static func isArchiveName(_ name: String) -> Bool {
         let ext = (name as NSString).pathExtension.lowercased()
         return ["7z", "zip", "rar", "tar", "gz", "bz2", "xz", "tgz", "tbz", "tbz2", "txz",
-                "iso", "cab", "wim", "zst", "zstd", "lzma", "001", "rz", "rzv", "rzr", "rzm"].contains(ext)
+                "iso", "cab", "wim", "zst", "zstd", "lzma", "001", "rz", "rzv", "rzr", "rzm", "rev"].contains(ext)
+            || ext.range(of: #"^r\d{2}$"#, options: .regularExpression) != nil
     }
 }
 

@@ -27,37 +27,19 @@ struct FileTransferView: View {
             }
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Text("传输速度").font(.subheadline.weight(.medium))
+                    Text("速度与总进度").font(.subheadline.weight(.medium))
                     Spacer()
                     Text(speedDescription).font(.subheadline).monospacedDigit()
                 }
-                Chart(transfer.samples) { sample in
-                    AreaMark(x: .value("用时", sample.id), y: .value("字节/秒", sample.bytesPerSecond))
-                        .foregroundStyle(Color.accentColor.opacity(0.16))
-                    LineMark(x: .value("用时", sample.id), y: .value("字节/秒", sample.bytesPerSecond))
-                        .foregroundStyle(Color.accentColor).lineStyle(StrokeStyle(lineWidth: 2))
-                }
-                .chartXScale(
-                    domain: max(0, (transfer.samples.last?.id ?? 0) - 60)...max(60, transfer.samples.last?.id ?? 0)
-                )
-                .chartYScale(domain: 0...max(1_048_576, (transfer.samples.map(\.bytesPerSecond).max() ?? 0) * 1.15))
-                .chartXAxis(.hidden)
-                .chartYAxis {
-                    AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
-                        AxisGridLine()
-                        AxisValueLabel {
-                            if let speed = value.as(Double.self) {
-                                Text(formatBytes(Int64(speed)) + "/s").font(.caption2)
-                            }
-                        }
-                    }
-                }
-                .frame(height: 130)
-                .accessibilityLabel("最近一分钟传输速度")
-                .accessibilityValue(speedDescription)
-                .transaction { $0.animation = nil }
+                TransferProgressChart(
+                    samples: transfer.samples, fraction: transfer.fraction,
+                    bytesPerSecond: transfer.bytesPerSecond, speedDescription: speedDescription)
                 HStack {
-                    Text("最近 60 秒")
+                    if let fraction = transfer.fraction {
+                        Text("总进度 \(fraction.formatted(.percent.precision(.fractionLength(0))))")
+                    } else {
+                        Text("正在计算总进度…")
+                    }
                     Spacer()
                     Text("用时 \(duration(transfer.elapsed))")
                 }.font(.caption).foregroundStyle(.secondary).monospacedDigit()
@@ -156,5 +138,89 @@ struct FileTransferView: View {
     }
 }
 
+struct TransferProgressChart: View {
+    let samples: [TransferSpeedSample]
+    let fraction: Double?
+    let bytesPerSecond: Double
+    let speedDescription: String
+
+    private var maximumSpeed: Double {
+        let peak = max(samples.map(\.bytesPerSecond).max() ?? 0, bytesPerSecond)
+        return peak > 0 ? peak * 1.15 : 1_048_576
+    }
+
+    var body: some View {
+        Chart {
+            if let fraction {
+                RectangleMark(
+                    xStart: .value("开始", 0), xEnd: .value("总进度", fraction),
+                    yStart: .value("基线", 0), yEnd: .value("速度上限", maximumSpeed)
+                ).foregroundStyle(Color.accentColor.opacity(0.06))
+            }
+            ForEach(samples) { sample in
+                AreaMark(x: .value("总进度", sample.fraction), y: .value("字节/秒", sample.bytesPerSecond))
+                    .foregroundStyle(Color.accentColor.opacity(0.18))
+                LineMark(x: .value("总进度", sample.fraction), y: .value("字节/秒", sample.bytesPerSecond))
+                    .foregroundStyle(Color.accentColor).lineStyle(StrokeStyle(lineWidth: 2))
+            }
+            if let fraction {
+                RuleMark(x: .value("当前进度", fraction))
+                    .foregroundStyle(Color.accentColor)
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                    .annotation(position: .top, alignment: fraction > 0.85 ? .trailing : .leading) {
+                        Text(fraction, format: .percent.precision(.fractionLength(0)))
+                            .font(.caption.weight(.semibold)).monospacedDigit()
+                    }
+                if !samples.isEmpty {
+                    PointMark(x: .value("当前进度", fraction), y: .value("当前速度", bytesPerSecond))
+                        .foregroundStyle(Color.accentColor).symbolSize(36)
+                }
+            }
+        }
+        .chartXScale(domain: 0...1)
+        .chartYScale(domain: 0...maximumSpeed)
+        .chartXAxis {
+            AxisMarks(values: [0.0, 0.25, 0.5, 0.75, 1.0]) { value in
+                AxisGridLine()
+                AxisTick()
+                AxisValueLabel(anchor: value.as(Double.self) == 1 ? .topTrailing : .topLeading) {
+                    if let fraction = value.as(Double.self) {
+                        Text(fraction, format: .percent.precision(.fractionLength(0))).font(.caption2)
+                    }
+                }
+            }
+        }
+        .chartYAxis {
+            AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
+                AxisGridLine()
+                AxisValueLabel {
+                    if let speed = value.as(Double.self) {
+                        Text(formatBytes(Int64(speed)) + "/s").font(.caption2)
+                    }
+                }
+            }
+        }
+        .frame(height: 150).padding(.top, 12)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("传输速度与总进度，横轴百分之零至百分之一百，纵轴每秒传输速度")
+        .accessibilityValue(
+            "进度 \(fraction?.formatted(.percent.precision(.fractionLength(0))) ?? "正在计算")，速度 \(speedDescription)"
+        )
+        .transaction { $0.animation = nil }
+    }
+}
+
 #Preview("文件传输") { FileTransferView(transfer: FileTransferStore()) }
 #Preview("文件传输 · 深色") { FileTransferView(transfer: FileTransferStore()).preferredColorScheme(.dark) }
+
+#Preview("速度与总进度 · 65%") {
+    TransferProgressChart(
+        samples: [
+            TransferSpeedSample(fraction: 0, bytesPerSecond: 0),
+            TransferSpeedSample(fraction: 0.1, bytesPerSecond: 90_000_000),
+            TransferSpeedSample(fraction: 0.3, bytesPerSecond: 55_000_000),
+            TransferSpeedSample(fraction: 0.5, bytesPerSecond: 120_000_000),
+            TransferSpeedSample(fraction: 0.65, bytesPerSecond: 85_000_000),
+        ], fraction: 0.65, bytesPerSecond: 85_000_000, speedDescription: "85 MB/s"
+    ).padding(24).frame(width: 540)
+}
