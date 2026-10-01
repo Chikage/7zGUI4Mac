@@ -56,8 +56,15 @@ struct OperationState {
         lastProgressAt = progress.timestamp
         fraction = progress.fraction
         detail = progress.message
-        if let metrics = progress.compression { compression = metrics }
-        if let metrics = progress.processing { processing = metrics }
+        if let metrics = progress.compression {
+            compression = metrics
+            showsCompression = progress.processing == nil
+        }
+        if let metrics = progress.processing {
+            processing = metrics
+            showsProcessing = true
+            showsCompression = false
+        }
     }
 }
 
@@ -68,6 +75,7 @@ enum ArchiveOpenAction {
 enum BrowserLocation: Equatable, Sendable {
     case directory(URL)
     case archive(URL, folder: String)
+    case mtp(MTPDirectory)
 }
 
 enum PasswordAction {
@@ -82,6 +90,8 @@ final class AppStore {
     var archiveIndex = ArchiveDirectoryIndex(entries: [])
     var browserHistory = BrowserHistory(BrowserLocation.directory(FileManager.default.homeDirectoryForCurrentUser))
     let files = FileBrowserStore()
+    let mtp: MTPBrowserStore
+    private var mtpArchiveParents: [URL: MTPDirectory] = [:]
     var search = ""
     var folder = ""
     var selection: Set<String> = []
@@ -109,14 +119,19 @@ final class AppStore {
     private var task: Task<Void, Never>?
     private let service: ArchiveService
     private let defaults: UserDefaults
-    var isBusy: Bool { operation != nil || files.transfer.isRunning }
+    var isBusy: Bool { operation != nil || files.transfer.isRunning || mtp.isWorking }
+    var isBrowsingMTP: Bool {
+        if case .mtp = browserHistory.current { return true }
+        return false
+    }
     var isBrowsingArchive: Bool {
         if case .archive = browserHistory.current { return true }
         return false
     }
     var canNavigateBrowser: Bool { !isBusy && !files.isLoading && !files.isMutating }
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, mtp: MTPBrowserStore = MTPBrowserStore()) {
+        self.mtp = mtp
         self.defaults = defaults
         let executable =
             Bundle.main.url(forAuxiliaryExecutable: "7zz")
@@ -199,8 +214,10 @@ final class AppStore {
                 browserHistory.visit(.archive(result.url, folder: ""))
             }
             page = .files
-            remember(result.url)
-            NSDocumentController.shared.noteNewRecentDocumentURL(result.url)
+            if mtpArchiveParents[result.url] == nil {
+                remember(result.url)
+                NSDocumentController.shared.noteNewRecentDocumentURL(result.url)
+            }
             return nil
         } onPassword: { [self] in
             passwordError = password.isEmpty ? nil : "密码未通过验证，请重试。"
@@ -250,8 +267,12 @@ final class AppStore {
             createSources = []
             return output
         } onSuccess: { [self] in
+            if options.deleteSourcesAfterVerification {
+                notice = "压缩和完整性校验通过，原文件已移入废纸篓。"
+            }
             if options.generateRecoveryKeyFile {
-                notice = "归档与 \(RecoveryArchive.keyFileURL(for: url).lastPathComponent) 已生成。请备份密钥；需要保密时分开存放。"
+                notice = (options.deleteSourcesAfterVerification ? "校验通过，原文件已移入废纸篓。" : "")
+                    + "归档与 \(RecoveryArchive.keyFileURL(for: url).lastPathComponent) 已生成。请备份密钥；需要保密时分开存放。"
             }
         }
     }
@@ -402,6 +423,7 @@ final class AppStore {
     }
 
     func cancel() {
+        mtp.cancel()
         files.transfer.cancel()
         operation?.cancelling = true
         operation?.detail = "正在取消并清理临时文件…"
@@ -427,6 +449,20 @@ final class AppStore {
         restoreBrowserLocation(next)
     }
 
+    func navigate(to location: MTPDirectory) {
+        var next = browserHistory
+        next.visit(.mtp(location))
+        restoreBrowserLocation(next)
+    }
+
+    func openMTPArchive(_ url: URL, from location: MTPDirectory) {
+        guard canNavigateBrowser else { return }
+        mtpArchiveParents[url] = location
+        var next = browserHistory
+        next.visit(.archive(url, folder: ""))
+        openArchive(url, history: next)
+    }
+
     func browserBack() {
         var next = browserHistory
         next.goBack()
@@ -440,7 +476,9 @@ final class AppStore {
     }
 
     func browserUp() {
-        if isBrowsingArchive {
+        if case .mtp(let location) = browserHistory.current {
+            if let parent = location.parent { navigate(to: parent) }
+        } else if isBrowsingArchive {
             if folder.isEmpty {
                 showArchiveParent()
             } else {
@@ -453,7 +491,11 @@ final class AppStore {
 
     func showArchiveParent() {
         guard let listing else { return }
-        navigate(to: listing.url.deletingLastPathComponent())
+        if let location = mtpArchiveParents[listing.url] {
+            navigate(to: location)
+        } else {
+            navigate(to: listing.url.deletingLastPathComponent())
+        }
     }
 
     func chooseDirectory() {
@@ -469,6 +511,11 @@ final class AppStore {
     private func restoreBrowserLocation(_ next: BrowserHistory<BrowserLocation>) {
         guard canNavigateBrowser else { return }
         switch next.current {
+        case .mtp(let location):
+            mtp.navigate(to: location) { [self] in
+                browserHistory = next
+                page = .files
+            }
         case .directory(let url):
             let archiveURL = isBrowsingArchive ? listing?.url : nil
             // Mark loading before scheduling work so rapid clicks cannot race history updates.

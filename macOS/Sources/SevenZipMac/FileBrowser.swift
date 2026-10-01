@@ -21,6 +21,8 @@ struct FileBrowser: View {
         Group {
             if store.isBrowsingArchive {
                 ArchiveBrowser(store: store)
+            } else if store.isBrowsingMTP {
+                MTPBrowser(store: store, mtp: store.mtp)
             } else {
                 localBrowser
             }

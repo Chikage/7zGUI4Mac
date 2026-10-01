@@ -127,3 +127,62 @@ private struct MouseFixture {
     checkbox.removeFromSuperview()
     #expect(fixture.interaction.item(at: try fixture.event(), in: fixture.monitor) == "file.txt")
 }
+
+@Test @MainActor func dragSelectsMultipleItemsAndShrinksInBothDirections() throws {
+    let fixture = MouseFixture()
+    defer { fixture.cleanup() }
+    let second = BrowserMouseTargetView(frame: NSRect(x: 140, y: 40, width: 100, height: 80))
+    second.itemID = "second.txt"
+    fixture.window.contentView?.addSubview(second)
+    fixture.interaction.register(second)
+    var selection: Set<String> = ["old.txt"]
+    fixture.monitor.readSelection = { selection }
+    fixture.monitor.writeSelection = { selection = $0 }
+    #expect(fixture.monitor.handleEvent(try fixture.event(at: NSPoint(x: 270, y: 150))) != nil)
+    #expect(fixture.monitor.handleEvent(try fixture.event(.leftMouseDragged, at: NSPoint(x: 10, y: 30))) == nil)
+    #expect(selection == ["file.txt", "second.txt"])
+    _ = fixture.monitor.handleEvent(try fixture.event(.leftMouseDragged, at: NSPoint(x: 130, y: 30)))
+    #expect(selection == ["second.txt"])
+    #expect(fixture.monitor.handleEvent(try fixture.event(.leftMouseUp, at: NSPoint(x: 130, y: 30))) == nil)
+    #expect(selection == ["second.txt"])
+}
+
+@Test @MainActor func marqueeHonorsCommandShiftAndCheckboxes() throws {
+    let fixture = MouseFixture()
+    defer { fixture.cleanup() }
+    var selection: Set<String> = []
+    fixture.monitor.readSelection = { selection }
+    fixture.monitor.writeSelection = { selection = $0 }
+    for modifiers: NSEvent.ModifierFlags in [[.command], [.shift]] {
+        selection = ["file.txt", "other.txt"]
+        _ = fixture.monitor.handleEvent(try fixture.event(at: NSPoint(x: 10, y: 30), modifiers: modifiers))
+        _ = fixture.monitor.handleEvent(try fixture.event(.leftMouseDragged, at: NSPoint(x: 100, y: 100)))
+        #expect(selection == (modifiers == .command ? ["other.txt"] : ["file.txt", "other.txt"]))
+        _ = fixture.monitor.handleEvent(try fixture.event(.leftMouseUp))
+    }
+    let checkbox = BrowserMouseTargetView(frame: NSRect(x: 40, y: 50, width: 20, height: 20))
+    checkbox.itemID = "file.txt"
+    checkbox.isSelectionControl = true
+    fixture.window.contentView?.addSubview(checkbox)
+    fixture.interaction.register(checkbox)
+    selection = ["other.txt"]
+    _ = fixture.monitor.handleEvent(try fixture.event())
+    #expect(fixture.monitor.handleEvent(try fixture.event(.leftMouseDragged, at: NSPoint(x: 100, y: 100))) != nil)
+    #expect(selection == ["other.txt"])
+}
+
+@Test @MainActor func dragPreservesSimpleClicksAndDisabledBrowser() throws {
+    let fixture = MouseFixture()
+    defer { fixture.cleanup() }
+    var selection: Set<String> = ["old"]
+    fixture.monitor.readSelection = { selection }
+    fixture.monitor.writeSelection = { selection = $0 }
+    _ = fixture.monitor.handleEvent(try fixture.event())
+    #expect(fixture.monitor.handleEvent(try fixture.event(.leftMouseDragged, at: NSPoint(x: 51, y: 61))) != nil)
+    #expect(fixture.monitor.handleEvent(try fixture.event(.leftMouseUp)) != nil)
+    #expect(selection == ["old"])
+    fixture.monitor.isEnabled = false
+    _ = fixture.monitor.handleEvent(try fixture.event(at: NSPoint(x: 10, y: 30)))
+    #expect(fixture.monitor.handleEvent(try fixture.event(.leftMouseDragged)) != nil)
+    #expect(selection == ["old"])
+}

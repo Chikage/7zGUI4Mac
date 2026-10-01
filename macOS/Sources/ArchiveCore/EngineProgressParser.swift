@@ -102,13 +102,14 @@ struct EngineProgressParser {
                 fraction = nil
                 message = "正在写入数据卷和恢复卷…"
             case "verifying":
-                fraction = nil
+                fraction = 0
                 message = "正在校验压缩结果…"
             case "completed":
                 fraction = 1
                 message = "压缩完成，正在保存…"
             default: return nil
             }
+            processing = nil
             metrics = value
             return snapshot(now: now)
         }

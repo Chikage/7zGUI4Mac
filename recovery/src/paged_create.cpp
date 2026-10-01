@@ -1,5 +1,6 @@
 #include "paged.hpp"
 #include "compression_progress.hpp"
+#include "read_progress.hpp"
 #include "recovery_pool.hpp"
 #include <algorithm>
 #include <exception>
@@ -210,7 +211,8 @@ void create_paged_archive(const InputPlan& plan, const fs::path& output, const R
         sidecar.append(encoded); sidecar.append(digest.data(), digest.size()); sidecar.sync();
     }
     timing.volume_write = elapsed_ns(phase_start); phase_start = TimingClock::now(); progress.phase("verifying");
-    verify_paged_created(staging.path, encoded, keys ? &*keys : nullptr, threads);
+    ReadProgress verification_progress;
+    verify_paged_created(staging.path, encoded, keys ? &*keys : nullptr, threads, report_progress ? &verification_progress : nullptr);
     timing.verify = elapsed_ns(phase_start); phase_start = TimingClock::now();
     if (security.generate_key_file) {
         const auto key_path = staging.path / ".recovery-key"; write_key_file(key_path, manifest.uuid, *security.password);

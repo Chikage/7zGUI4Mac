@@ -382,7 +382,8 @@ void create_configurable_archive(const InputPlan& plan, const fs::path& output, 
     // the one we just produced. Reusing its keys avoids a second password KDF
     // while still verifying every decrypted record before publication.
     auto written = load(staging.path);
-    if (written.encoded != a.encoded || verify_loaded(written, keys ? &*keys : nullptr, threads).exit_code() != 0)
+    ReadProgress verification_progress;
+    if (written.encoded != a.encoded || verify_loaded(written, keys ? &*keys : nullptr, threads, report_progress ? &verification_progress : nullptr).exit_code() != 0)
         throw std::runtime_error("Created output verification failed");
     timing.verify = elapsed_ns(phase_start); phase_start = TimingClock::now();
     if (security && security->generate_key_file) {

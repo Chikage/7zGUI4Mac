@@ -3,6 +3,18 @@ import Testing
 
 @testable import SevenZipMac
 
+@Test func compressionSwitchesToVerificationStatistics() {
+    var operation = OperationState(title: "创建压缩包", detail: "压缩", showsCompression: true)
+    let read = ProcessingMetrics(totalBytes: 1000, totalFiles: 2)
+    operation.apply(EngineProgress(fraction: 0.25, message: "校验", compression: CompressionMetrics(), processing: read))
+    #expect(!operation.showsCompression)
+    #expect(operation.showsProcessing)
+    #expect(operation.fraction == 0.25)
+    #expect(operation.processing?.totalBytes == 1000)
+    operation.apply(EngineProgress(fraction: 1, message: "完成", compression: CompressionMetrics()))
+    #expect(operation.showsCompression)
+}
+
 @Test func operationIgnoresStaleAndCancelledProgress() {
     var operation = OperationState(title: "创建压缩包", detail: "准备中", showsCompression: true)
     let old = EngineProgress(fraction: 0.1, message: "旧数据")

@@ -6,6 +6,8 @@ struct CreateArchiveSheet: View {
     @Bindable var store: AppStore
     @Environment(\.dismiss) private var dismiss
     @State private var name = "归档"
+    @State private var suggestedName = "归档"
+    @State private var deleteSourcesAfterVerification = false
     @State private var directory = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask)[0]
     @State private var format: ArchiveFormat = .sevenZip
     @State private var level = 5
@@ -60,6 +62,11 @@ struct CreateArchiveSheet: View {
                 Divider()
                 RARAdvancedSettingsForm(options: $rarOptions)
             }
+            Divider()
+            Toggle("校验压缩包完好后自动删除原文件", isOn: $deleteSourcesAfterVerification)
+                .accessibilityIdentifier("archive-delete-sources")
+            Text("仅在压缩和完整性校验成功后，将原文件移入废纸篓。压缩或校验取消、校验失败、来源发生变化时保留原文件。")
+                .font(.caption).foregroundStyle(.secondary)
             if let validation {
                 Label(validation, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.red)
             }
@@ -74,6 +81,7 @@ struct CreateArchiveSheet: View {
         }
         .task(id: format) { await checkAESCapability() }
         .onAppear(perform: initializeDestination)
+        .onChange(of: store.createSources) { _, _ in updateSuggestedName() }
     }
 
     private var canSubmit: Bool {
@@ -98,10 +106,16 @@ struct CreateArchiveSheet: View {
     }
 
     private func initializeDestination() {
+        updateSuggestedName()
         if let first = store.createSources.first {
-            name = store.createSources.count == 1 ? first.deletingPathExtension().lastPathComponent : "归档"
             directory = first.deletingLastPathComponent()
         }
+    }
+
+    private func updateSuggestedName() {
+        let suggestion = ArchiveNameSuggestion.name(for: store.createSources)
+        if name == suggestedName { name = suggestion }
+        suggestedName = suggestion
     }
 
     private func addFiles() {
@@ -114,7 +128,6 @@ struct CreateArchiveSheet: View {
         for url in panel.urls where !store.createSources.contains(url) { store.createSources.append(url) }
         if store.createSources.count == panel.urls.count, let first = panel.urls.first {
             directory = first.deletingLastPathComponent()
-            if panel.urls.count == 1 { name = first.deletingPathExtension().lastPathComponent }
         }
     }
 
@@ -129,7 +142,8 @@ struct CreateArchiveSheet: View {
             }
             var options = CompressionOptions(
                 format: format, level: level,
-                password: usesPassword ? password : "", encryptNames: encryptNames)
+                password: usesPassword ? password : "", encryptNames: encryptNames,
+                deleteSourcesAfterVerification: deleteSourcesAfterVerification)
             if format == .rar {
                 try rarOptions.validate(password: options.password)
                 options.rar = rarOptions

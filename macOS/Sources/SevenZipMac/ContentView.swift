@@ -57,19 +57,21 @@ struct ContentView: View {
             )
         ) { FileTransferView(transfer: store.files.transfer) }
         .alert(
-            store.errorMessage == nil && store.metadataWarningMessage != nil ? "部分属性未恢复" : "操作未完成",
+            store.errorMessage == nil && store.mtp.errorMessage == nil && store.metadataWarningMessage != nil
+                ? "部分属性未恢复" : "操作未完成",
             isPresented: Binding(
-                get: { store.errorMessage != nil || store.metadataWarningMessage != nil },
+                get: { store.errorMessage != nil || store.mtp.errorMessage != nil || store.metadataWarningMessage != nil },
                 set: {
                     if !$0 {
                         store.errorMessage = nil
+                        store.mtp.errorMessage = nil
                         store.metadataWarningMessage = nil
                     }
                 })
         ) {
-            Button("好") { store.errorMessage = nil }
+            Button("好") { store.errorMessage = nil; store.mtp.errorMessage = nil }
         } message: {
-            Text(store.errorMessage ?? store.metadataWarningMessage ?? "")
+            Text(store.errorMessage ?? store.mtp.errorMessage ?? store.metadataWarningMessage ?? "")
         }
     }
 
@@ -159,17 +161,24 @@ struct ContentView: View {
 
     private var statusBar: some View {
         HStack(spacing: 8) {
-            Image(systemName: store.notice == nil ? "checkmark.circle" : "checkmark.circle.fill")
-                .foregroundStyle(store.notice == nil ? Color.secondary : Color.green)
-            Text(store.notice ?? "准备就绪").lineLimit(1)
-            Spacer()
-            if let output = store.lastOutput {
-                Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([output]) }.buttonStyle(.link)
-                if !output.hasDirectoryPath || output.pathExtension.lowercased() == "rz" {
-                    Button("打开归档") { store.openArchive(output) }.buttonStyle(.link)
-                }
+            if store.mtp.isWorking {
+                ProgressView().controlSize(.small)
+                Text(store.mtp.isDownloading ? "正在下载 MTP 文件…" : "正在读取 MTP 设备…")
+                Spacer()
+                Button("取消") { store.mtp.cancel() }
             } else {
-                Text("本地处理").foregroundStyle(.secondary)
+                Image(systemName: store.notice == nil ? "checkmark.circle" : "checkmark.circle.fill")
+                    .foregroundStyle(store.notice == nil ? Color.secondary : Color.green)
+                Text(store.notice ?? "准备就绪").lineLimit(1)
+                Spacer()
+                if let output = store.lastOutput {
+                    Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([output]) }.buttonStyle(.link)
+                    if !output.hasDirectoryPath || output.pathExtension.lowercased() == "rz" {
+                        Button("打开归档") { store.openArchive(output) }.buttonStyle(.link)
+                    }
+                } else {
+                    Text("本地处理").foregroundStyle(.secondary)
+                }
             }
         }
         .font(.caption).padding(.horizontal, 24).padding(.vertical, 12)

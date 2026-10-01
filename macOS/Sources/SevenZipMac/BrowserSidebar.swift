@@ -19,6 +19,7 @@ struct FileBrowserSidebar: View {
             }
             .buttonStyle(.plain)
         }.disabled(!store.canNavigateBrowser)
+        MTPBrowserSidebar(store: store, mtp: store.mtp)
         Section("文件夹") {
             DirectoryTreeRow(store: store, url: URL(fileURLWithPath: "/Volumes", isDirectory: true), title: "磁盘与卷")
             DirectoryTreeRow(store: store, url: files.home, title: "个人文件夹")
@@ -42,7 +43,7 @@ private struct DirectoryTreeRow: View {
     let url: URL
     var title: String? = nil
     private var isExpanded: Bool { files.expanded.contains(url.path) }
-    private var isSelected: Bool { !store.isBrowsingArchive && files.directory.path == url.path }
+    private var isSelected: Bool { !store.isBrowsingArchive && !store.isBrowsingMTP && files.directory.path == url.path }
 
     var body: some View {
         DisclosureGroup(isExpanded: Binding(get: { isExpanded }, set: { files.setExpanded(url, $0) })) {

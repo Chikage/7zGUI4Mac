@@ -117,8 +117,8 @@ struct BrowserItemsView<MenuContent: View>: View {
                 default: grid
                 }
             }
-            .background {
-                BrowserMouseMonitor(interaction: mouseInteraction) { id, event in
+            .overlay {
+                BrowserMouseMonitor(interaction: mouseInteraction, selection: $selection) { id, event in
                     if event.type == .rightMouseDown || event.modifierFlags.contains(.control) {
                         if !selection.contains(id) {
                             select(id, modifiers: [])

@@ -27,6 +27,25 @@ def records(result):
 
 
 class ReadProgressTests(unittest.TestCase):
+    def test_creation_verification_progress(self):
+        for profile in (3, 4, 5):
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / 'source'
+                source.mkdir()
+                data = b'creation verification\n' * 750_000
+                (source / 'content.bin').write_bytes(data)
+                options = ['--profile', profile, '--no-metadata', '--progress']
+                if profile >= 4:
+                    options += ['--data-volumes', 2, '--recovery-volumes', 1]
+                result = run('create', source, root / 'archive', *options)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                rows = records(result)
+                self.assertTrue(any(r[1] == 'storage' and int(r[3]) > 0 for r in rows))
+                self.assertTrue(any(r[1] == 'checking' and 0 < int(r[2]) < len(data) for r in rows))
+                self.assertNotIn('content.bin', result.stderr)
+                self.assertNotIn('RZREADPROGRESS1', result.stdout)
+
     def test_all_profiles_and_encrypted_reads(self):
         for profile, encrypted in [(1, False), (2, False), (3, False), (4, False),
                                    (5, False), (3, True), (4, True), (5, True)]:

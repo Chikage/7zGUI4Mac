@@ -78,6 +78,23 @@ private final class ProgressRecorder: @unchecked Sendable {
     #expect(value.ratio == 3)
 }
 
+@Test func creationVerificationReportsRealReadProgress() throws {
+    var parser = EngineProgressParser()
+    let start = try #require(parser.consume(Data("RZPROGRESS1\tverifying\t100\t100\t2\t2\t40\t2000\n".utf8)).last)
+    #expect(start.fraction == 0)
+    let storage = try #require(parser.consume(Data("RZREADPROGRESS1\tstorage\t50\t200\t0\t0\t1000\n".utf8)).last)
+    #expect(storage.fraction == 0.25)
+    #expect(storage.processing?.processedBytes == 50)
+    #expect(storage.processing?.bytesPerSecond == 50)
+    let contents = try #require(parser.consume(Data("RZREADPROGRESS1\tchecking\t50\t100\t1\t2\t1000\n".utf8)).last)
+    #expect(contents.fraction == 0.5)
+    #expect(contents.processing?.completedFiles == 1)
+    let done = try #require(parser.consume(Data("RZPROGRESS1\tcompleted\t100\t100\t2\t2\t40\t2000\n".utf8)).last)
+    #expect(done.fraction == 1)
+    #expect(done.processing == nil)
+    #expect(done.compression?.totalBytes == 100)
+}
+
 @Test func processReportsUnterminatedProgressBeforeExit() async throws {
     let log = ProgressRecorder()
     let start = ContinuousClock.now

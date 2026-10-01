@@ -140,11 +140,14 @@ actor RARArchiveService {
             progress(EngineProgress(message: "正在生成 REV 恢复卷…"))
             try await createRecoveryVolumes(first, options: options.rar, password: options.password, progress: progress)
         }
-        if options.rar.testAfterCreation {
-            progress(EngineProgress(message: "正在校验新建 RAR…"))
-            _ = try await run("t", archive: first, password: options.password, progress: progress)
-        }
         let listing = try await list(first, password: options.password)
+        if options.rar.testAfterCreation {
+            progress(EngineProgress(fraction: 0, message: "正在校验新建 RAR…"))
+            _ = try await run(
+                "t", archive: first, password: options.password, readOperation: .verify,
+                totals: ProcessingMetrics(totalBytes: listing.totalSize, totalFiles: Int64(listing.fileCount)),
+                progress: progress)
+        }
         var completed = CompressionMetrics()
         completed.totalBytes = listing.totalSize
         completed.processedBytes = listing.totalSize

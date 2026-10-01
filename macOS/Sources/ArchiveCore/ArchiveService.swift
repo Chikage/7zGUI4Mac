@@ -59,6 +59,50 @@ public actor ArchiveService {
         _ sources: [URL], to destination: URL, options: CompressionOptions,
         progress: @escaping @Sendable (EngineProgress) -> Void = { _ in }
     ) async throws -> URL {
+        try await compress(sources, to: destination, options: options, progress: progress) { source in
+            try FileManager.default.trashItem(at: source, resultingItemURL: nil)
+        }
+    }
+
+    // Injectable recycling keeps safety tests confined to their temporary fixtures.
+    func compress(
+        _ sources: [URL], to destination: URL, options: CompressionOptions,
+        progress: @escaping @Sendable (EngineProgress) -> Void = { _ in },
+        recycle: @Sendable (URL) throws -> Void
+    ) async throws -> URL {
+        let cleanup: ArchiveSourceCleanup?
+        if options.deleteSourcesAfterVerification {
+            try ArchiveSourceCleanup.validate(options)
+            progress(EngineProgress(message: "正在记录原文件状态…"))
+            cleanup = try ArchiveSourceCleanup(sources: sources)
+        } else {
+            cleanup = nil
+        }
+        let output = try await create(cleanup?.sources ?? sources, to: destination, options: options, progress: progress)
+        if let cleanup {
+            do {
+                try Task.checkCancellation()
+                progress(EngineProgress(fraction: 0, message: "正在校验压缩包，原文件暂时保留…"))
+                try await test(
+                    output, password: options.password,
+                    keyFile: options.generateRecoveryKeyFile ? RecoveryArchive.keyFileURL(for: output) : nil,
+                    progress: progress)
+                try Task.checkCancellation()
+                try cleanup.recycleUnchangedSources(using: recycle, progress: progress)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw ArchiveError.invalidInput(
+                    "压缩包已保存到“\(output.path)”，但未完成原文件清理：\(error.localizedDescription)")
+            }
+        }
+        return output
+    }
+
+    private func create(
+        _ sources: [URL], to destination: URL, options: CompressionOptions,
+        progress: @escaping @Sendable (EngineProgress) -> Void
+    ) async throws -> URL {
         if options.format == .rar {
             return try await rar.compress(sources, to: destination, options: options, progress: progress)
         }

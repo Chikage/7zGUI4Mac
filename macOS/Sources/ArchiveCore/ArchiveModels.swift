@@ -124,6 +124,7 @@ public struct CompressionOptions: Sendable {
     public var preserveMetadata: Bool
     public var recoveryEncryption: RecoveryEncryption
     public var generateRecoveryKeyFile: Bool
+    public var deleteSourcesAfterVerification: Bool
     public var rar: RAROptions
     public init(
         format: ArchiveFormat = .sevenZip, level: Int = 5,
@@ -132,7 +133,7 @@ public struct CompressionOptions: Sendable {
         recoveryPayload: RecoveryPayload = .percentage(basisPoints: 2000), preserveMetadata: Bool = true,
         recoveryEncryption: RecoveryEncryption = .standard, generateRecoveryKeyFile: Bool = false,
         recoveryVolumeCounts: RecoveryVolumeCounts? = nil, countedRecoveryProfile: CountedRecoveryProfile = .paged,
-        rar: RAROptions = RAROptions()
+        rar: RAROptions = RAROptions(), deleteSourcesAfterVerification: Bool = false
     ) {
         self.format = format
         self.level = level
@@ -146,6 +147,7 @@ public struct CompressionOptions: Sendable {
         self.recoveryEncryption = recoveryEncryption
         self.generateRecoveryKeyFile = generateRecoveryKeyFile
         self.rar = rar
+        self.deleteSourcesAfterVerification = deleteSourcesAfterVerification
     }
 }
 

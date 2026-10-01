@@ -79,7 +79,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let store, store.isBusy else { return .terminateNow }
         let alert = NSAlert()
-        alert.messageText = store.files.transfer.isRunning ? "正在传输文件" : "正在处理归档"
+        alert.messageText = store.mtp.isWorking ? "正在访问 MTP 设备"
+            : store.files.transfer.isRunning ? "正在传输文件" : "正在处理归档"
         alert.informativeText = "退出将取消当前操作，并清理未完成的临时文件。"
         alert.addButton(withTitle: "继续处理")
         alert.addButton(withTitle: "取消操作并退出")

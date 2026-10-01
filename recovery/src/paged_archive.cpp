@@ -399,10 +399,10 @@ Verification verify_paged_archive(const fs::path& directory, const Password* pas
     if (result.exit_code() == 0 && (!a.bootstrap.manifest.security.encrypted || password)) verify_contents(a, keys ? &*keys : nullptr, 0, progress);
     return result;
 }
-void verify_paged_created(const fs::path& directory, const Bytes& expected_bootstrap, const ArchiveKeys* keys, uint32_t threads) {
+void verify_paged_created(const fs::path& directory, const Bytes& expected_bootstrap, const ArchiveKeys* keys, uint32_t threads, ReadProgress* progress) {
     auto a = load(directory);
-    if (a.encoded != expected_bootstrap || scan(a, threads).exit_code() != 0) throw std::runtime_error("Created profile 5 storage verification failed");
-    verify_contents(a, keys, threads);
+    if (a.encoded != expected_bootstrap || scan(a, threads, progress).exit_code() != 0) throw std::runtime_error("Created profile 5 storage verification failed");
+    verify_contents(a, keys, threads, progress);
 }
 void repair_paged_archive(const fs::path& directory, const fs::path& output) {
     auto a = load(directory); require_outside(a.directory, output); Staging stage(output);
