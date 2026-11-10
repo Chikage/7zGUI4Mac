@@ -75,23 +75,12 @@ struct ArchiveBrowser: View {
                 )
                 .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 if let recovery = listing.recoveryDetails {
-                    if recovery.hasCountedVolumes, let size = recovery.volumeSizeBytes,
-                        let losses = recovery.toleratedVolumeLosses
-                    {
-                        Text(
-                            "\(recovery.dataVolumes) 个数据卷 + \(recovery.recoveryVolumes) 个恢复卷 · 每卷 \(formatRecoveryBytes(size))"
-                        )
+                    Text(
+                        "\(recovery.dataVolumes) 个数据卷 + \(recovery.recoveryVolumes) 个恢复卷 · 每卷 \(formatRecoveryBytes(recovery.volumeSizeBytes))"
+                    )
+                    .font(.caption).foregroundStyle(.secondary)
+                    Text("其余卷完整时，可修复任意 \(recovery.toleratedVolumeLosses) 个缺失卷。")
                         .font(.caption).foregroundStyle(.secondary)
-                        Text("其余卷完整时，可修复任意 \(losses) 个缺失卷。")
-                            .font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        Text(
-                            "每卷上限 \(formatRecoveryBytes(recovery.volumeLimitBytes)) · 恢复载荷 \(formatRecoveryBytes(recovery.payloadBytes)) · 实际比例 \(recovery.actualRatio.formatted(.percent.precision(.fractionLength(1))))"
-                        )
-                        .font(.caption).foregroundStyle(.secondary)
-                    }
-                } else if listing.format == "RZ" {
-                    Text("旧版归档 · 固定 10+2 恢复配置").font(.caption).foregroundStyle(.secondary)
                 }
                 if listing.preservesMetadata {
                     Text("包含文件权限与扩展属性").font(.caption).foregroundStyle(.secondary)

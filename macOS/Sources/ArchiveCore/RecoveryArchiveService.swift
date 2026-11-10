@@ -24,13 +24,13 @@ enum RecoveryListingParser {
     private struct Listing: Decodable {
         let version: Int
         let entries: [Entry]
-        let recovery: RecoveryDetails?
-        let encrypted: Bool?
-        let locked: Bool?
-        let preservesMetadata: Bool?
-        let directoryUnavailable: Bool?
-        let encryptionSuite: Int?
-        let requiresKeyFile: Bool?
+        let recovery: RecoveryDetails
+        let encrypted: Bool
+        let locked: Bool
+        let preservesMetadata: Bool
+        let directoryUnavailable: Bool
+        let encryptionSuite: Int
+        let requiresKeyFile: Bool
         struct Entry: Decodable {
             let path: String
             let size: Int64
@@ -40,23 +40,23 @@ enum RecoveryListingParser {
 
     static func parse(_ output: String, url: URL, physicalSize: Int64) throws -> ArchiveListing {
         guard let listing = try? JSONDecoder().decode(Listing.self, from: Data(output.utf8)),
-            listing.version == 1, listing.entries.count <= 100_000, listing.recovery?.isValid != false
+            listing.version == 1, listing.entries.count <= 100_000, listing.recovery.isValid
         else { throw ArchiveError.malformedListing }
-        guard listing.locked != true || (listing.encrypted == true && listing.entries.isEmpty) else {
+        guard !listing.locked || (listing.encrypted && listing.entries.isEmpty) else {
             throw ArchiveError.malformedListing
         }
-        guard listing.directoryUnavailable != true || listing.entries.isEmpty else {
+        guard !listing.directoryUnavailable || listing.entries.isEmpty else {
             throw ArchiveError.malformedListing
         }
-        guard listing.requiresKeyFile != true || listing.encrypted == true else { throw ArchiveError.malformedListing }
+        guard !listing.requiresKeyFile || listing.encrypted else { throw ArchiveError.malformedListing }
         let encryption: RecoveryEncryption?
-        if listing.encrypted == true {
-            guard let suite = RecoveryEncryption(rawValue: listing.encryptionSuite ?? 1) else {
+        if listing.encrypted {
+            guard let suite = RecoveryEncryption(rawValue: listing.encryptionSuite) else {
                 throw ArchiveError.malformedListing
             }
             encryption = suite
         } else {
-            guard listing.encryptionSuite == nil || listing.encryptionSuite == 0 else {
+            guard listing.encryptionSuite == 0 else {
                 throw ArchiveError.malformedListing
             }
             encryption = nil
@@ -69,14 +69,14 @@ enum RecoveryListingParser {
             else { throw ArchiveError.malformedListing }
             return ArchiveEntry(
                 path: entry.path, size: entry.size, isDirectory: entry.isDirectory,
-                isEncrypted: listing.encrypted == true)
+                isEncrypted: listing.encrypted)
         }
         return ArchiveListing(
             url: url, format: "RZ", physicalSize: physicalSize, entries: entries, recoveryDetails: listing.recovery,
-            encrypted: listing.encrypted == true, locked: listing.locked == true,
-            preservesMetadata: listing.preservesMetadata == true,
-            directoryUnavailable: listing.directoryUnavailable == true, recoveryEncryption: encryption,
-            requiresKeyFile: listing.requiresKeyFile == true)
+            encrypted: listing.encrypted, locked: listing.locked,
+            preservesMetadata: listing.preservesMetadata,
+            directoryUnavailable: listing.directoryUnavailable, recoveryEncryption: encryption,
+            requiresKeyFile: listing.requiresKeyFile)
     }
 }
 
@@ -141,16 +141,7 @@ actor RecoveryArchiveService {
         progress: @escaping @Sendable (EngineProgress) -> Void
     ) async throws -> URL {
         guard !sources.isEmpty else { throw ArchiveError.invalidInput("请先添加要压缩的文件。") }
-        let recoveryArguments: [String]
-        if let counts = options.recoveryVolumeCounts {
-            recoveryArguments = ["--profile", "\(options.countedRecoveryProfile.rawValue)"] + (try counts.arguments())
-        } else {
-            guard (1024 * 1024...16 * 1024 * 1024 * 1024).contains(options.recoveryVolumeSizeBytes) else {
-                throw ArchiveError.invalidInput("每卷上限必须在 1 MiB–16 GiB 之间。")
-            }
-            recoveryArguments =
-                ["--volume-size", "\(options.recoveryVolumeSizeBytes)"] + (try options.recoveryPayload.arguments())
-        }
+        let recoveryArguments = ["--profile", "5"] + (try options.recoveryVolumeCounts.arguments())
         guard !options.generateRecoveryKeyFile || options.password.isEmpty else {
             throw ArchiveError.invalidInput("请选择密码或密钥文件中的一种保护方式。")
         }
@@ -315,35 +306,19 @@ actor RecoveryArchiveService {
         if result.output.contains("Archive authentication failed") {
             throw ArchiveError.invalidInput("加密认证未通过，归档可能已被修改或损坏。未输出解密内容。")
         }
-        if result.output.contains("Unrecoverable stripe") { throw ArchiveError.recoveryUnrecoverable }
+        if result.output.contains("Unrecoverable profile 5") { throw ArchiveError.recoveryUnrecoverable }
         if result.output.contains("run repair first") { throw ArchiveError.recoveryRepairable }
         if result.output.contains("Mixed archive IDs") {
             throw ArchiveError.invalidInput("目录中混入了其他归档的分卷，请将不同归档的分卷分开放置。")
         }
-        if result.output.contains("Replicated index does not fit") {
-            throw ArchiveError.invalidInput("归档索引无法放入所选大小的分卷，请增大每卷大小后重试。")
+        if result.output.contains("Unsupported RZ profile") {
+            throw ArchiveError.invalidInput("当前版本仅支持 RZ 第 5 版归档。")
         }
         if result.output.contains("Only regular files/directories") {
             throw ArchiveError.invalidInput("可恢复归档只支持普通文件和文件夹，不能包含符号链接或其他特殊文件。")
         }
-        if result.output.contains("No valid manifest remains") {
+        if result.output.contains("No valid profile 5 bootstrap remains") {
             throw ArchiveError.invalidInput("没有找到完好的归档索引。请补回其他分卷或索引文件后重试。")
-        }
-        if result.output.contains("Recovery payload too small:")
-            || result.output.contains("Recovery payload too large:")
-        {
-            let pattern = #"(?:minimum|maximum)=(\d+) bytes"#
-            if let range = result.output.range(of: pattern, options: .regularExpression) {
-                let digits = result.output[range].filter(\.isNumber)
-                if let bytes = Int64(digits) {
-                    let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .binary)
-                    let message =
-                        result.output.contains("too small")
-                        ? "恢复载荷不足以保护所有编码组，本次归档至少需要 \(size)。请增大恢复容量或改用按比例。"
-                        : "恢复容量超过本次压缩数据的大小，最多可设置为 \(size)。请减小恢复容量或改用按比例。"
-                    throw ArchiveError.invalidInput(message)
-                }
-            }
         }
         let readable = result.output.unicodeScalars.filter {
             $0 == "\n" || $0 == "\t" || !CharacterSet.controlCharacters.contains($0)

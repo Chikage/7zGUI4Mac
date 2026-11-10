@@ -1,4 +1,4 @@
-# 独立恢复密钥文件（RZ profile 3）
+# 独立恢复密钥文件（RZ 第 5 版）
 
 GUI 的 RZ 保护方式默认选择“自动生成密钥文件”，默认加密算法为现有的
 XChaCha20-Poly1305 + AES-256-GCM 双层套件。可显式选择标准套件或改用密码／不加密。
@@ -48,9 +48,9 @@ ASCII("RZKEY001")[8] || archive_uuid[16] || random_secret[32] || BLAKE3(previous
 密钥文件格式、长度、摘要和 UUID 都要检查，之后仍须通过归档密钥包装、公开索引 MAC
 及记录 AEAD 认证。输入仅以 O_NOFOLLOW 打开普通文件；文件长度严格限制为 88 字节。
 
-profile 3 新增 security_flags bit2（值 4）表示独立密钥来源，且必须同时设置加密位。
+启动元数据中的 security_flags bit2（值 4）表示独立密钥来源，且必须同时设置加密位。
 算法套件编号不变，password_opslimit 和 password_memlimit 均为 0，读取器严格校验。
-此标志被公开索引 MAC 认证，旧读取器按未知标志拒绝；旧密码归档的字节布局保持不变。
+启动元数据的 MAC 同时认证此标志和密钥槽。
 
 包装根密钥为 BLAKE2b-256：key=random_secret，message 为：
 

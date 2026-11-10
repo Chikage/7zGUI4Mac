@@ -34,8 +34,7 @@ class KeyFileTests(unittest.TestCase):
 
     def tearDown(self): shutil.rmtree(self.root)
     def create(self, archive=None, suite=None):
-        return run('create', self.source, archive or self.archive, '--generate-key-file', '--encryption', suite or self.suite,
-                   '--volume-size', '1MiB', '--recovery-percent', '30')
+        return run('create', self.source, archive or self.archive, '--generate-key-file', '--encryption', suite or self.suite)
     def listing(self, archive=None, *args): return json.loads(run('list', archive or self.archive, '--json', *args).stdout)
 
     def test_generated_key_and_automatic_unlock(self):
@@ -52,7 +51,8 @@ class KeyFileTests(unittest.TestCase):
         run('extract', self.archive, self.root / 'out')
         self.assertEqual(hashes(self.source), hashes(self.root / 'out'))
         self.assertEqual(stat.S_IMODE((self.root / 'out/private.txt').stat().st_mode), 0o640)
-        self.assertTrue(all(p.stat().st_size <= 1024 * 1024 for p in self.archive.iterdir()))
+        size = self.listing()['recovery']['volumeSizeBytes']
+        self.assertEqual({p.stat().st_size for p in self.archive.glob('*.rz[vr]')}, {size})
 
     def test_missing_key_prompts_and_manual_key_works(self):
         self.create(); backup = self.root / 'separate'; backup.mkdir(); moved = backup / 'renamed.backup'

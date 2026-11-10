@@ -21,7 +21,8 @@ void write_security(binary::Writer& w, const SecurityInfo& s) {
 }
 }
 PagedLayout paged_layout(uint64_t stream_size, uint32_t k, uint32_t m) {
-    if (!stream_size || stream_size > MaxPagedStream || k < 1 || k > 100 || m < 1 || m > k)
+    validate_volume_counts(k, m);
+    if (!stream_size || stream_size > MaxStream)
         throw std::runtime_error("Invalid profile 5 geometry");
     PagedLayout l;
     l.data_stripes = ceil_div(stream_size, uint64_t(k) * BlockSize);
@@ -34,7 +35,7 @@ PagedLayout paged_layout(uint64_t stream_size, uint32_t k, uint32_t m) {
 Bytes serialize_bootstrap(const PagedBootstrap& b) {
     const auto& m = b.manifest; binary::Writer w; w.limit = MaxBootstrap;
     w.raw("RZIDX005", 8); w.raw(m.uuid.data(), 16);
-    for (auto v : {5U, BlockSize, FrameSize, m.options.data_volumes, m.options.recovery_volumes}) w.u32(v);
+    for (auto v : {FormatVersion, BlockSize, FrameSize, m.options.data_volumes, m.options.recovery_volumes}) w.u32(v);
     w.u64(m.stream_size); w.u64(b.layout.data_stripes); w.u64(b.layout.index_stripes);
     w.u32(b.layout.hash_pages); w.u64(b.layout.root_size); w.raw(b.root_hash.data(), 32);
     write_security(w, m.security);
@@ -45,25 +46,11 @@ Bytes serialize_bootstrap(const PagedBootstrap& b) {
     if (w.b.size() > MaxBootstrap) throw std::runtime_error("Profile 5 bootstrap limit exceeded");
     return w.b;
 }
-void update_paged_summary(PagedBootstrap& b) {
-    auto& m = b.manifest; m.profile = 5; m.options.profile = 5;
-    m.options.mode = RecoveryMode::Volumes; m.options.value = 0; m.options.volume_size = 0;
-    m.blocks_per_volume = static_cast<uint32_t>(b.layout.data_stripes);
-    m.data_blocks = b.layout.data_stripes * m.options.data_volumes;
-    m.recovery_blocks = b.layout.data_stripes * m.options.recovery_volumes;
-    m.content_limit = MaxPagedOutput;
-    m.metadata_bytes_per_volume = 2 * HeaderSize + 2 * serialize_bootstrap(b).size()
-        + b.layout.data_stripes * 32 + b.layout.index_stripes * PagedRecordSize;
-    const auto mac = m.security.public_mac;
-    m.security.public_mac.fill(0);
-    m.authentication_bytes = serialize_bootstrap(b);
-    m.security.public_mac = mac;
-}
 PagedBootstrap parse_bootstrap(const Bytes& bytes) {
     if (bytes.size() > MaxBootstrap) throw std::runtime_error("Oversized profile 5 bootstrap");
     binary::Reader r{bytes}; PagedBootstrap b; auto& m = b.manifest;
     r.magic("RZIDX005"); r.raw(m.uuid.data(), 16);
-    for (auto expected : {5U, BlockSize, FrameSize}) if (r.u32() != expected) throw std::runtime_error("Unsupported profile 5 parameters");
+    for (auto expected : {FormatVersion, BlockSize, FrameSize}) if (r.u32() != expected) throw std::runtime_error("Unsupported profile 5 parameters");
     m.options.data_volumes = r.u32(); m.options.recovery_volumes = r.u32(); m.stream_size = r.u64();
     auto expected = paged_layout(m.stream_size, m.options.data_volumes, m.options.recovery_volumes);
     b.layout.data_stripes = r.u64(); b.layout.index_stripes = r.u64(); b.layout.hash_pages = r.u32(); b.layout.root_size = r.u64();
@@ -93,13 +80,20 @@ PagedBootstrap parse_bootstrap(const Bytes& bytes) {
         const bool dual = s.key_slot.suite == DualCryptoProfile;
         if (dual) r.raw(s.key_slot.aes_nonce.data(), 12);
         s.key_slot.wrapped_key.resize(dual ? 96 : 48); r.raw(s.key_slot.wrapped_key.data(), s.key_slot.wrapped_key.size());
-        r.raw(s.public_mac.data(), 32);
+        const auto mac_offset = r.p;
+        r.raw(s.public_mac.data(), s.public_mac.size());
+        m.authentication_bytes = bytes;
+        std::fill_n(m.authentication_bytes.begin() + mac_offset, s.public_mac.size(), 0);
     }
     const auto hash_count = r.u32();
     if (hash_count != m.options.data_volumes + m.options.recovery_volumes) throw std::runtime_error("Invalid index volume digest count");
     b.index_volume_hashes.resize(hash_count);
     for (auto& h : b.index_volume_hashes) r.raw(h.data(), h.size());
-    r.end(); m.unlocked = false; update_paged_summary(b); return b;
+    r.end();
+    m.data_bytes_per_volume = b.layout.data_stripes * BlockSize;
+    m.metadata_bytes_per_volume = 2 * HeaderSize + 2 * bytes.size()
+        + b.layout.data_stripes * 32 + b.layout.index_stripes * PagedRecordSize;
+    return b;
 }
 Bytes serialize_page_root(const PagedBootstrap& b, const std::vector<Digest>& hashes) {
     if (hashes.size() != b.layout.hash_pages) throw std::runtime_error("Invalid hash page count");
@@ -122,19 +116,19 @@ Digest index_block_hash(const UUID& uuid, uint32_t stripe, uint32_t column, cons
 }
 Bytes make_paged_header(const PagedBootstrap& b, bool parity, uint32_t volume, bool footer) {
     auto bootstrap = serialize_bootstrap(b); binary::Writer w;
-    w.raw(footer ? "RZEND005" : "RZVOL005", 8); w.u32(5); w.u32(parity ? 1 : 0); w.raw(b.manifest.uuid.data(), 16);
+    w.raw(footer ? "RZEND005" : "RZVOL005", 8); w.u32(FormatVersion); w.u32(parity ? 1 : 0); w.raw(b.manifest.uuid.data(), 16);
     w.u32(volume); w.u32(0); w.u64(bootstrap.size()); w.u64((b.layout.data_stripes + b.layout.index_stripes) * PagedRecordSize);
     auto digest = hash(bootstrap); w.raw(digest.data(), 32); digest = hash(w.b); w.raw(digest.data(), 32); return w.b;
 }
-ConfigurableHeader parse_paged_header(const Bytes& bytes, bool footer) {
+PagedHeader parse_paged_header(const Bytes& bytes, bool footer) {
     if (bytes.size() != HeaderSize) throw std::runtime_error("Invalid profile 5 header size");
     Digest expected{}; std::copy(bytes.end()-32, bytes.end(), expected.begin());
     if (hash(bytes.data(), HeaderSize-32) != expected) throw std::runtime_error("Bad profile 5 header checksum");
-    binary::Reader r{bytes}; ConfigurableHeader h; r.magic(footer ? "RZEND005" : "RZVOL005");
-    h.profile = r.u32(); auto parity = r.u32(); r.raw(h.uuid.data(), 16); h.volume = r.u32(); auto reserved = r.u32();
+    binary::Reader r{bytes}; PagedHeader h; r.magic(footer ? "RZEND005" : "RZVOL005");
+    const auto profile = r.u32(); auto parity = r.u32(); r.raw(h.uuid.data(), 16); h.volume = r.u32(); auto reserved = r.u32();
     h.manifest_size = r.u64(); h.payload_size = r.u64(); r.raw(h.manifest_hash.data(), 32);
-    if (h.profile != 5 || parity > 1 || reserved || h.volume >= 100 || h.manifest_size < 144 || h.manifest_size > MaxBootstrap ||
-        !h.payload_size || h.payload_size % PagedRecordSize || h.payload_size > 2 * MaxPagedStream)
+    if (profile != FormatVersion || parity > 1 || reserved || h.volume >= MaxDataShards || h.manifest_size < 144 || h.manifest_size > MaxBootstrap ||
+        !h.payload_size || h.payload_size % PagedRecordSize || h.payload_size > 2 * MaxStream)
         throw std::runtime_error("Invalid profile 5 header geometry");
     h.parity = parity; return h;
 }

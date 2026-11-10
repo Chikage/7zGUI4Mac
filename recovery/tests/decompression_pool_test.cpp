@@ -114,7 +114,7 @@ void cleanup() {
     require(std::all_of(raw, raw + sizeof state, [](auto byte) { return byte == 0; }), "keyed hash state not wiped");
 }
 void verification() {
-    rz::ConfigurableManifest manifest; manifest.profile = 3;
+    rz::ArchiveManifest manifest;
     std::array<unsigned char, 64> master{};
     rz::ArchiveKeys writer(master.data()), reader(master.data(), rz::CryptoProfile, false);
     manifest.security.encrypted = true;
@@ -145,15 +145,13 @@ void output_limits() {
     if (!rz::aes_available()) return;
     std::array<unsigned char, 64> master{}; rz::UUID uuid{};
     auto compressed = rz::compress_frame(rz::Bytes(32, 73));
-    const auto offset = rz::MaxOutput + rz::MaxOutput / 100 + 1;
-    rz::ArchiveKeys legacy(master.data(), rz::DualCryptoProfile);
-    rejects([&] { (void)legacy.seal(uuid, rz::RecordKind::Content, offset, 32, compressed); }, "legacy encrypted stream limit removed");
-    rz::ArchiveKeys paged(master.data(), rz::DualCryptoProfile, true, rz::MaxPagedOutput);
+    const uint64_t offset = 512ULL << 30;
+    rz::ArchiveKeys paged(master.data(), rz::DualCryptoProfile);
     rz::ArchiveKeys reader(master.data(), rz::DualCryptoProfile, false);
     auto record = paged.seal(uuid, rz::RecordKind::Content, offset, 32, compressed);
     require(reader.open(uuid, rz::RecordKind::Content, offset, 32, record) == compressed, "large-offset encrypted record cannot roundtrip");
     rejects([&] { (void)paged.seal(uuid, rz::RecordKind::Content, offset, 32, compressed); }, "large-offset nonce reuse accepted");
-    rejects([&] { rz::ArchiveKeys invalid(master.data(), rz::DualCryptoProfile, true, UINT64_MAX); }, "overflowing encrypted stream limit accepted");
+    rejects([&] { (void)paged.seal(uuid, rz::RecordKind::Content, rz::MaxStream + 1, 32, compressed); }, "offset beyond stream limit accepted");
 }
 }
 int main() {

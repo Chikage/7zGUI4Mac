@@ -31,24 +31,9 @@ int main() {
             rejects([&] { (void)rz::unlock_keys(uuid, password, slot); });
             auto downgraded = slot; downgraded.key_file = false;
             rejects([&] { (void)rz::unlock_keys(uuid, read, downgraded); });
-
-            rz::Manifest packed; packed.uuid = uuid; packed.stream_size = 128;
-            rz::SecurityInfo security; security.encrypted = true; security.key_slot = slot;
-            security.index_plain_size = 24; security.index_frames.push_back({0, 128, 24});
-            auto m = rz::configure(packed, {}, &security); rz::sign_manifest(m, keys);
-            auto encoded = rz::serialize(m);
-            require(rz::parse_configurable_manifest(encoded).security.key_slot.key_file, "Key-file flag lost");
-            require(rz::authenticate_manifest(m, &read).has_value(), "Key-file manifest authentication");
-            auto changed = m; changed.security.public_mac[0] ^= 1;
-            rejects([&] { (void)rz::authenticate_manifest(changed, &read); });
-            size_t tail = suite == rz::CryptoProfile ? 140 : 200;
-            auto flag_tamper = encoded; flag_tamper[encoded.size() - tail - 32] ^= 4;
-            rejects([&] { (void)rz::parse_configurable_manifest(flag_tamper); });
-            auto cost_tamper = encoded; cost_tamper[encoded.size() - tail + 4] = 3;
-            rejects([&] { (void)rz::parse_configurable_manifest(cost_tamper); });
         }
         rz::fs::remove_all(root);
-        std::cout << "Key-file wrapping, credential domains, UUID binding and KDF flag tampering passed\n";
+        std::cout << "Key-file wrapping, credential domains, UUID binding passed\n";
         return 0;
     } catch (const std::exception& e) {
         std::error_code error; rz::fs::remove_all(root, error); std::cerr << e.what() << '\n'; return 1;

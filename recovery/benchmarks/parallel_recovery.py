@@ -11,10 +11,11 @@ import tempfile
 import time
 
 
-def measure(binary, source, output, threads, percent):
+def measure(binary, source, output, threads, k, m):
     start = time.monotonic(); phases = {}; timing = None
     with subprocess.Popen([str(binary), 'create', str(source), str(output), '--threads', str(threads),
-                           '--no-metadata', '--progress', '--recovery-percent', str(percent)],
+                           '--no-metadata', '--progress', '--profile', '5',
+                           '--data-volumes', str(k), '--recovery-volumes', str(m)],
                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True) as process:
         errors = []
         for line in process.stderr:
@@ -38,7 +39,7 @@ def measure(binary, source, output, threads, percent):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary', type=Path)
-    parser.add_argument('--reference', type=Path, help='optional previous-version binary (4 compression workers)')
+    parser.add_argument('--reference', type=Path, help='optional profile 5 reference binary (4 compression workers)')
     parser.add_argument('--size-mib', type=int, default=128)
     parser.add_argument('--repeats', type=int, default=3)
     parser.add_argument('--output', type=Path, help='save JSON results')
@@ -58,13 +59,13 @@ def main():
             source = root / dataset; source.mkdir()
             with (source / 'data').open('wb') as file:
                 for _ in range(args.size_mib // 4): file.write(chunk)
-            for percent in (1, 20, 100):
+            for k, m in ((100, 1), (10, 2), (4, 4)):
                 samples = {label: [] for label, _, _ in modes}
                 for _ in range(args.repeats):
                     for label, executable, threads in modes:
-                        samples[label].append(measure(executable, source, root / 'output.rz', threads, percent))
+                        samples[label].append(measure(executable, source, root / 'output.rz', threads, k, m))
                 for label, _, _ in modes:
-                    result = {'dataset': dataset, 'size_mib': args.size_mib, 'recovery_percent': percent, 'mode': label,
+                    result = {'dataset': dataset, 'size_mib': args.size_mib, 'data_volumes': k, 'recovery_volumes': m, 'mode': label,
                               **{key: round(statistics.median(row[key] for row in samples[label]), 3) for key in samples[label][0]}}
                     results.append(result); print(json.dumps(result), flush=True)
     if args.output: args.output.write_text(json.dumps(results, indent=2) + '\n')

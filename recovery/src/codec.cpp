@@ -31,22 +31,6 @@ std::string hex(const Digest& d) {
     for (auto b : d) { out += digits[b >> 4]; out += digits[b & 15]; }
     return out;
 }
-Digest block_hash(const UUID& uuid, uint32_t group, uint32_t shard, uint32_t stripe, const Bytes& block) {
-    blake3_hasher h;
-    blake3_hasher_init(&h);
-    constexpr char domain[] = "rz-block-v1";
-    blake3_hasher_update(&h, domain, sizeof(domain) - 1);
-    blake3_hasher_update(&h, uuid.data(), uuid.size());
-    for (uint32_t v : {group, shard, stripe}) {
-        uint8_t le[4];
-        for (int i = 0; i < 4; ++i) le[i] = static_cast<uint8_t>(v >> (i * 8));
-        blake3_hasher_update(&h, le, 4);
-    }
-    blake3_hasher_update(&h, block.data(), block.size());
-    Digest out{};
-    blake3_hasher_finalize(&h, out.data(), out.size());
-    return out;
-}
 Bytes compress_frame(const Bytes& data) {
     Bytes out(ZSTD_compressBound(data.size())); WipeOnExit cleanup(out);
     auto n = ZSTD_compress(out.data(), out.size(), data.data(), data.size(), 3);
@@ -84,7 +68,7 @@ Bytes FrameDecoder::decode(const Bytes& data, uint32_t size) {
     check_cancel(); cleanup.release(); return out;
 }
 Bytes decompress_frame(const Bytes& data, uint32_t size) { FrameDecoder decoder; return decoder.decode(data, size); }
-Digest block_hash_v2(const UUID& uuid, uint32_t group, uint32_t shard, const Bytes& block) {
+Digest data_block_hash(const UUID& uuid, uint32_t group, uint32_t shard, const Bytes& block) {
     blake3_hasher h; blake3_hasher_init(&h);
     constexpr char domain[] = "rz-block-v2";
     blake3_hasher_update(&h, domain, sizeof(domain) - 1);
@@ -111,20 +95,25 @@ struct RecoveryEncoder::Impl {
         if (!scratch) throw std::bad_alloc();
         if (!gf_init_hard(&field, 8, GF_MULT_DEFAULT, GF_REGION_DEFAULT, GF_DIVIDE_DEFAULT, 0x11d, 0, 0, nullptr, scratch.get()))
             throw std::runtime_error("Cannot initialize independent GF(256) context");
-        for (uint32_t r = 0; r < 128; ++r)
-            for (uint32_t c = 0; c < 100; ++c)
-                matrix[r * 100 + c] = static_cast<uint8_t>(field.divide.w32(&field, 1, (128 + r) ^ c));
+        for (uint32_t r = 0; r < MaxDataShards; ++r)
+            for (uint32_t c = 0; c < MaxDataShards; ++c)
+                matrix[r * MaxDataShards + c] = static_cast<uint8_t>(field.divide.w32(&field, 1, (128 + r) ^ c));
     }
     gf_t field{};
     std::unique_ptr<void, decltype(&std::free)> scratch{nullptr, std::free};
     size_t scratch_size = 0;
-    std::array<uint8_t, 128 * 100> matrix{};
+    std::array<uint8_t, MaxDataShards * MaxDataShards> matrix{};
 };
 RecoveryEncoder::RecoveryEncoder() : impl_(std::make_unique<Impl>()) {}
 RecoveryEncoder::~RecoveryEncoder() = default;
 size_t RecoveryEncoder::memory_usage() const { return sizeof(*this) + sizeof(Impl) + impl_->scratch_size; }
+void validate_volume_counts(uint32_t k, uint32_t m) {
+    if (k < 1 || k > MaxDataShards || m < 1 || m > k)
+        throw std::runtime_error("Volume counts require 1 <= recovery volumes <= data volumes <= 100");
+}
 void RecoveryEncoder::encode(uint32_t k, uint32_t m, std::span<Bytes> blocks, std::stop_token stop) {
-    if (k < 1 || k > 100 || m < 1 || m > 128 || blocks.size() != k + m)
+    validate_volume_counts(k, m);
+    if (blocks.size() != k + m)
         throw std::runtime_error("Invalid recovery encoding geometry");
     for (const auto& block : blocks)
         if (block.size() != BlockSize) throw std::runtime_error("Invalid recovery block size");
@@ -133,12 +122,11 @@ void RecoveryEncoder::encode(uint32_t k, uint32_t m, std::span<Bytes> blocks, st
         if (stop.stop_requested()) throw std::runtime_error("Operation cancelled");
         for (uint32_t c = 0; c < k; ++c)
             impl_->field.multiply_region.w32(&impl_->field, blocks[c].data(), blocks[k + r].data(),
-                                             impl_->matrix[r * 100 + c], BlockSize, c != 0);
+                                             impl_->matrix[r * MaxDataShards + c], BlockSize, c != 0);
     }
 }
-ReedSolomon::ReedSolomon(uint32_t k, uint32_t m, uint32_t profile) : k_(k), m_(m) {
-    if (!((profile == 1 && k == K && m == M) || (profile == 2 && k >= 1 && k <= 100 && m >= 1 && m <= 128)))
-        throw std::runtime_error("Unsupported RS geometry");
+ReedSolomon::ReedSolomon(uint32_t k, uint32_t m) : k_(k), m_(m) {
+    validate_volume_counts(k, m);
     matrix_.resize(k * m);
     static std::once_flag once;
     std::call_once(once, [] {
@@ -155,7 +143,7 @@ ReedSolomon::ReedSolomon(uint32_t k, uint32_t m, uint32_t profile) : k_(k), m_(m
     });
     for (uint32_t r = 0; r < m; ++r)
         for (uint32_t c = 0; c < k; ++c)
-            matrix_[r * k + c] = galois_single_divide(1, static_cast<int>(profile == 1 ? r ^ (M + c) : (128 + r) ^ c), 8);
+            matrix_[r * k + c] = galois_single_divide(1, static_cast<int>((128 + r) ^ c), 8);
 }
 static std::vector<char*> pointers(std::span<Bytes> blocks, uint32_t expected) {
     if (blocks.size() != expected) throw std::runtime_error("Invalid RS shard count");

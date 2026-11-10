@@ -2,17 +2,23 @@
 #include "protected.hpp"
 
 namespace rz {
-constexpr uint64_t MaxPagedStream = MaxPagedOutput + MaxPagedOutput / 100;
 constexpr uint32_t PagedRecordSize = BlockSize + 32;
 constexpr uint32_t MaxBootstrap = 8192;
 constexpr uint32_t MaxPagedRoot = 1024 * 1024;
+struct PagedHeader {
+    UUID uuid{};
+    bool parity = false;
+    uint32_t volume = 0;
+    uint64_t manifest_size = 0, payload_size = 0;
+    Digest manifest_hash{};
+};
 struct PagedLayout {
     uint64_t data_stripes = 0, index_stripes = 0;
     uint32_t hash_pages = 0;
     uint64_t root_size = 0;
 };
 struct PagedBootstrap {
-    ConfigurableManifest manifest;
+    ArchiveManifest manifest;
     PagedLayout layout;
     Digest root_hash{};
     std::vector<Digest> index_volume_hashes;
@@ -24,12 +30,10 @@ Bytes serialize_page_root(const PagedBootstrap& bootstrap, const std::vector<Dig
 std::vector<Digest> parse_page_root(const PagedBootstrap& bootstrap, const Bytes& bytes);
 Digest index_block_hash(const UUID& uuid, uint32_t stripe, uint32_t column, const Bytes& block);
 Bytes make_paged_header(const PagedBootstrap& bootstrap, bool parity, uint32_t volume, bool footer);
-ConfigurableHeader parse_paged_header(const Bytes& bytes, bool footer);
-void update_paged_summary(PagedBootstrap& bootstrap);
-bool uses_paged_profile(const fs::path& directory);
+PagedHeader parse_paged_header(const Bytes& bytes, bool footer);
 void create_paged_archive(const InputPlan& plan, const fs::path& output, const RecoveryOptions& options,
                           const SecurityOptions& security, bool report_progress = false, uint32_t threads = 0);
-ConfigurableManifest list_paged_archive(const fs::path& directory, const Password* password = nullptr);
+ArchiveManifest list_paged_archive(const fs::path& directory, const Password* password = nullptr);
 Verification verify_paged_archive(const fs::path& directory, const Password* password = nullptr, ReadProgress* progress = nullptr);
 void verify_paged_created(const fs::path& directory, const Bytes& expected_bootstrap, const ArchiveKeys* keys, uint32_t threads = 0, ReadProgress* progress = nullptr);
 void repair_paged_archive(const fs::path& directory, const fs::path& output);

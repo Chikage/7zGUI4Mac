@@ -41,6 +41,5 @@ private:
 UUID random_uuid();
 void require_directory(const fs::path& path);
 bool within(const fs::path& child, const fs::path& parent);
-void copy_file_contents(const File& source, File& destination, uint64_t size);
 fs::path recovery_key_path(const fs::path& archive);
 }

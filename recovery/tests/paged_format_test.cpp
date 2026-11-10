@@ -23,16 +23,15 @@ rz::PagedBootstrap bootstrap(uint64_t size, uint32_t k = 10, uint32_t m = 2) {
     b.manifest.security.index_frames.push_back({size - 128, 128, 64});
     b.index_volume_hashes.resize(k + m);
     for (size_t i = 0; i < b.index_volume_hashes.size(); ++i) b.index_volume_hashes[i][0] = static_cast<uint8_t>(i + 1);
-    b.layout = rz::paged_layout(size, k, m); rz::update_paged_summary(b); return b;
+    b.layout = rz::paged_layout(size, k, m); return b;
 }
 void layouts() {
-    require(rz::MaxOutput == 64ULL * 1024 * 1024 * 1024, "legacy content limit changed");
-    require(rz::MaxPagedOutput == 1024ULL * 1024 * 1024 * 1024, "profile 5 content limit is not 1 TiB");
+    require(rz::MaxOutput == 1024ULL * 1024 * 1024 * 1024, "profile 5 content limit is not 1 TiB");
     for (uint32_t k : {1U, 2U, 10U, 100U}) {
         for (uint32_t m : {1U, k}) {
             for (uint64_t size : {uint64_t(1), uint64_t(k) * rz::BlockSize - 1,
                                   uint64_t(k) * rz::BlockSize, uint64_t(k) * rz::BlockSize + 1,
-                                  rz::MaxOutput + 1, rz::MaxPagedOutput, rz::MaxPagedStream}) {
+                                  (uint64_t(64) << 30) + 1, rz::MaxOutput, rz::MaxStream}) {
                 const auto layout = rz::paged_layout(size, k, m);
                 require(layout.data_stripes * k * rz::BlockSize >= size, "content does not fit physical stripe allocation");
                 require((layout.data_stripes - 1) * k * rz::BlockSize < size, "content stripe allocation is not minimal");
@@ -47,20 +46,17 @@ void layouts() {
                 auto b = bootstrap(size, k, m); auto encoded = rz::serialize_bootstrap(b);
                 auto decoded = rz::parse_bootstrap(encoded);
                 require(rz::serialize_bootstrap(decoded) == encoded, "large bootstrap roundtrip changed wire bytes");
-                require(decoded.manifest.profile == 5 && decoded.manifest.content_limit == rz::MaxPagedOutput,
-                        "parsed profile 5 summary exposes the wrong limit");
-                require(decoded.manifest.data_blocks == layout.data_stripes * k &&
-                        decoded.manifest.recovery_blocks == layout.data_stripes * m, "summary block counts do not match stripes");
+                require(decoded.manifest.data_bytes_per_volume == layout.data_stripes * rz::BlockSize, "incorrect per-volume data allocation");
             }
         }
     }
-    for (auto size : {uint64_t(0), rz::MaxPagedStream + 1, UINT64_MAX})
+    for (auto size : {uint64_t(0), rz::MaxStream + 1, UINT64_MAX})
         rejects([&] { (void)rz::paged_layout(size, 10, 2); }, "out-of-range stream accepted");
     for (auto pair : {std::pair{0U, 1U}, std::pair{101U, 1U}, std::pair{10U, 0U}, std::pair{10U, 11U}})
         rejects([&] { (void)rz::paged_layout(128, pair.first, pair.second); }, "unsupported RS geometry accepted");
 }
 void malformed_bootstraps() {
-    auto b = bootstrap(rz::MaxPagedOutput); auto valid = rz::serialize_bootstrap(b);
+    auto b = bootstrap(rz::MaxOutput); auto valid = rz::serialize_bootstrap(b);
     for (size_t length = 0; length < valid.size(); ++length) {
         rz::Bytes short_bytes(valid.begin(), valid.begin() + length);
         rejects([&] { (void)rz::parse_bootstrap(short_bytes); }, "truncated bootstrap accepted");
@@ -71,7 +67,7 @@ void malformed_bootstraps() {
     };
     test(0, 0, 1); test(24, 4, 4); test(28, 1, 4); test(32, 0, 4);
     test(36, 0, 4); test(36, 101, 4); test(40, 0, 4); test(40, 11, 4);
-    test(44, 0, 8); test(44, rz::MaxPagedStream + 1, 8); test(44, UINT64_MAX, 8);
+    test(44, 0, 8); test(44, rz::MaxStream + 1, 8); test(44, UINT64_MAX, 8);
     test(52, b.layout.data_stripes + 1, 8); test(60, b.layout.index_stripes + 1, 8);
     test(68, UINT32_MAX, 4); test(72, UINT64_MAX, 8);
     test(112, 8, 4); test(112, 4, 4);
@@ -85,10 +81,9 @@ void malformed_bootstraps() {
     auto trailing = valid; trailing.push_back(0);
     rejects([&] { (void)rz::parse_bootstrap(trailing); }, "trailing bootstrap data accepted");
     rejects([&] { (void)rz::parse_bootstrap(rz::Bytes(rz::MaxBootstrap + 1)); }, "unbounded bootstrap accepted");
-    rejects([&] { (void)rz::parse_configurable_manifest(valid); }, "legacy parser silently accepted profile 5");
 }
 void roots_and_headers() {
-    for (auto size : {rz::MaxOutput + 1, rz::MaxPagedOutput, rz::MaxPagedStream}) {
+    for (auto size : {(uint64_t(64) << 30) + 1, rz::MaxOutput, rz::MaxStream}) {
         auto b = bootstrap(size, 1, 1);
         std::vector<rz::Digest> hashes(b.layout.hash_pages);
         for (size_t i = 0; i < hashes.size(); ++i) {
@@ -111,7 +106,7 @@ void roots_and_headers() {
             for (bool footer : {false, true}) {
                 auto header = rz::make_paged_header(b, parity, 0, footer);
                 auto h = rz::parse_paged_header(header, footer);
-                require(h.profile == 5 && h.parity == parity && h.uuid == b.manifest.uuid,
+                require(h.parity == parity && h.uuid == b.manifest.uuid,
                         "volume header identity changed");
                 require(h.payload_size == (b.layout.data_stripes + b.layout.index_stripes) * rz::PagedRecordSize,
                         "volume payload size excludes protected index");
@@ -135,7 +130,7 @@ void roots_and_headers() {
     }
     rz::UUID uuid{}; rz::Bytes block(rz::BlockSize, 73);
     const auto baseline = rz::index_block_hash(uuid, 0, 0, block);
-    require(baseline != rz::block_hash_v2(uuid, 0, 0, block), "index and content block hash domains collide");
+    require(baseline != rz::data_block_hash(uuid, 0, 0, block), "index and content block hash domains collide");
     require(baseline != rz::index_block_hash(uuid, 1, 0, block), "index stripe absent from hash domain");
     require(baseline != rz::index_block_hash(uuid, 0, 1, block), "index column absent from hash domain");
     uuid[0] = 1; require(baseline != rz::index_block_hash(uuid, 0, 0, block), "archive identity absent from index hash");
@@ -143,11 +138,11 @@ void roots_and_headers() {
 void authentication() {
     for (auto suite : {rz::CryptoProfile, rz::DualCryptoProfile}) {
         if (suite == rz::DualCryptoProfile && !rz::aes_available()) continue;
-        auto b = bootstrap(rz::MaxPagedOutput); auto credential = rz::generate_recovery_key();
+        auto b = bootstrap(rz::MaxOutput); auto credential = rz::generate_recovery_key();
         credential.archive_uuid = b.manifest.uuid;
         auto& security = b.manifest.security; security.encrypted = true;
         security.key_slot.key_file = true; security.key_slot.suite = suite;
-        auto keys = rz::create_keys(b.manifest.uuid, credential, security.key_slot, rz::MaxPagedOutput);
+        auto keys = rz::create_keys(b.manifest.uuid, credential, security.key_slot);
         security.public_mac = keys.manifest_mac(rz::serialize_bootstrap(b));
         auto valid = rz::serialize_bootstrap(b); auto parsed = rz::parse_bootstrap(valid);
         require(rz::authenticate_manifest(parsed.manifest, &credential).has_value(), "parsed profile 5 authentication failed");
@@ -172,24 +167,22 @@ void authentication() {
         rejects([&] { (void)rz::authenticate_manifest(parsed.manifest, &wrong); }, "wrong recovery key authenticated profile 5");
     }
 }
-void legacy_limit() {
-    rz::binary::Writer w; rz::Entry entry; entry.path = "large"; entry.size = rz::MaxOutput + 1;
+void large_entry() {
+    rz::binary::Writer w; rz::Entry entry; entry.path = "large"; entry.size = (uint64_t(64) << 30) + 1;
     uint64_t offset = 0;
     while (offset < entry.size) {
         const auto size = static_cast<uint32_t>(std::min<uint64_t>(rz::FrameSize, entry.size - offset));
         entry.frames.push_back({offset, size, size}); offset += size;
     }
     rz::binary::write_entries(w, {entry});
-    rz::binary::Reader old{w.b};
-    rejects([&] { (void)rz::binary::read_entries(old, entry.size); }, "legacy entry parser lost 64 GiB cap");
-    rz::binary::Reader paged{w.b}; auto entries = rz::binary::read_entries(paged, entry.size, 0, rz::MaxPagedOutput);
+    rz::binary::Reader paged{w.b}; auto entries = rz::binary::read_entries(paged, entry.size);
     require(entries.size() == 1 && entries.front().size == entry.size, "profile 5 cannot index content beyond 64 GiB");
     paged.end();
 }
 }
 int main() {
     try {
-        layouts(); malformed_bootstraps(); roots_and_headers(); authentication(); legacy_limit();
-        std::cout << "Profile 5 1 TiB layout, bounded bootstrap/root/header parsing, authentication and legacy limits passed\n";
+        layouts(); malformed_bootstraps(); roots_and_headers(); authentication(); large_entry();
+        std::cout << "Profile 5 1 TiB layout, bounded bootstrap/root/header parsing, authentication and large entries passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

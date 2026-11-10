@@ -1,5 +1,7 @@
 # 本地验证记录
 
+以下按日期记录当时的实现和测试结果。当前 RZ 仅支持[第 5 版格式](../../recovery/docs/FORMAT-V5.md)。
+
 ## MTP 只读浏览 — 2026-10-01
 
 - 120 项 Swift 测试通过（89 项 ArchiveCore、31 项应用），启用 warnings-as-errors。
@@ -77,7 +79,7 @@
   每卷 594,320 字节，详情显示 4 个数据卷 + 2 个恢复卷及可容忍两卷丢失。
 - 对上述 GUI 产物的副本移除两个数据卷，使用新引擎修复后以原密钥解压，内容逐字节一致。
 - Release 应用按 warnings-as-errors 构建、签名验证通过；旧版归档读取和传统格式测试保持通过。
-- 新格式及调度定义见 ../../recovery/docs/FORMAT-V4.md；后端故障注入和检查器结果见 ../../recovery/docs/VALIDATION.md。
+- 当时的后端故障注入与检查器结果见 [后端验证记录](../../recovery/docs/VALIDATION.md)。
 
 ## 同目录恢复密钥自动解锁 — 2026-09-27
 

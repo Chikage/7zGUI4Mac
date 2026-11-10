@@ -1,8 +1,7 @@
 # RZ Profile 5：分页摘要索引与可恢复索引区
 
 状态：实验格式；实现版本 `rz 0.7.0`。所有整数为无符号小端，摘要为完整 32 字节 BLAKE3。
-Profile 1–4 的字节含义、内容上限和默认 CLI 行为保持不变。新格式只支持等大 K+M 卷，
-`1 <= M <= K <= 100`。GUI 默认创建 Profile 5；CLI 显式使用 `--profile 5`，仅指定卷数仍创建 Profile 4。
+CLI 与 GUI 均只读写 Profile 5。默认 10 个数据卷和 2 个恢复卷，支持等大 K+M 卷（`1 <= M <= K <= 100`）。
 
 ## 限额与目标
 
@@ -63,17 +62,16 @@ bootstrap长度 u64、载荷长度 u64=`(D+I)*R`、bootstrap摘要[32]、前88�
 | 124 | 私有目录帧数 u32 |
 | 128 | 每帧 offset u64、stored u32、plain u32 |
 
-随后，加密归档写入与 Profile3 相同的套件号、KDF 参数、salt、nonce、可选 AES nonce、wrapped key、public MAC。
+随后，加密归档写入套件号、KDF 参数、salt、nonce、可选 AES nonce、wrapped key、public MAC。
 最后总是写入 `index_volume_hash_count u32 = K+M` 及 `K+M` 个索引卷整体摘要，先数据卷后恢复卷。
 整体摘要为该卷索引区域所有 `payload || local_digest` 记录的连续 BLAKE3。
 
 加密归档的 public MAC 沿用 `ArchiveKeys::manifest_mac`，输入是将 MAC 字段置零的**整个 bootstrap**，
-因此同时认证根表摘要、索引卷摘要、几何、身份和密钥包装参数。不可使用旧公开索引的序列化器。
-增加内容上限只放宽 Profile5 写入器的记录偏移上限；旧 profile 的创建与解析仍限制为 64 GiB。
+因此同时认证根表摘要、索引卷摘要、几何、身份和密钥包装参数。
 
 ## 摘要页、根表与索引保护
 
-数据块摘要沿用 `block_hash_v2(UUID,stripe,column,payload)`，块号从0开始，列顺序为 K 数据列、M 恢复列。
+数据块摘要沿用 `BLAKE3("rz-block-v2" || UUID || stripe:u32 || column:u32 || payload[65536])`，块号从0开始，列顺序为 K 数据列、M 恢复列。
 每个数据记录尾部保存该摘要。把所有数据条带的 `(K+M)` 个摘要按条带顺序连接，切成 P 个 64 KiB 叶页，
 最后一页补零。每个叶页计算完整 BLAKE3。
 
@@ -84,7 +82,7 @@ RZROOT05[8] || UUID[16] || K:u32 || M:u32 || D:u64 || P:u32 || leaf_hash[P][32]
 ```
 
 索引逻辑流为 `全部叶页 || 根表`，根表起点为 `P*B`，尾部补零后按 K 数据列 + M 恢复列独立编码。
-索引与内容区域都使用 Profile2 系统 Cauchy 矩阵、GF(256)/0x11d，不调用不同矩阵的旧 Profile1 模式。
+索引与内容区域使用相同的系统 Cauchy 矩阵，恢复行系数为 GF(256)/0x11d 中 (128 + 行号) XOR 数据列号的乘法逆元。
 索引记录局部摘要为：
 
 ```
@@ -106,7 +104,7 @@ BLAKE3("rz5-index-block" || UUID || stripe:u32 || column:u32 || payload[65536])
 - 完整验证扫描所有内容/恢复记录和索引区域。数据卷按最多4路顺序IO扫描，解密/解压复用有界256 MiB池；
   创建时显式线程数同样约束复验，独立 verify/extract 默认自动调度。
 - 根表至多1MiB，页缓存16页（1MiB），RS工作集至多200个块（12.5MiB）。
-  大归档创建按需生成均匀几何，不分配逐块摘要或逐条带 CodingGroup 数组。
+  大归档创建按需生成均匀几何，只暂存摘要叶页和根表。
   完整扫描另有每数据条带2字节错误计数，1TiB最窄条带时约34MiB；索引、线程栈等不属于压缩池预算。
 - 私有目录和内容解密仍使用 AEAD；临时磁盘不保存解密后的输入流。敏感内存异常路径清零。
 - 创建使用直接暂存卷、回填头尾、fsync、重新打开完整复验，再禁止覆盖地原子发布。
@@ -116,12 +114,11 @@ BLAKE3("rz5-index-block" || UUID || stripe:u32 || column:u32 || payload[65536])
 - 超过恢复预算、所有可定位启动副本失效、错误认证或非法布局必须失败；不发布部分结果。
   `.rzkey` 不在 RS 保护内；实际断电与介质故障仍需后续实机验证。
 
-固定的第二个 RS 索引区域会增加小归档填充开销。该版本优先解决大归档索引扩展和索引可恢复性，
-保留 Profile4 供已有读取器及对小归档兼容性有要求的调用者使用。
+固定的第二个 RS 索引区域会增加小归档填充开销。
 
 ## 实现与验证入口
 
 `paged_format.cpp`：有界bootstrap、几何、根表、域和卷头；`paged_create.cpp`：流式建页及编码；
 `paged_archive.cpp`：页读取、认证、扫描、修复与提取。
-`paged_format_test` 验证1TiB合成几何和旧上限，`paged_security_test` 验证自洽伪造与恢复，
-`paginated_archive` 验证真实多页、缺卷、损坏、兼容默认值与取消；详见 [验证记录](VALIDATION.md)。
+`paged_format_test` 验证1 TiB 合成几何和内容上限，`paged_security_test` 验证自洽伪造与恢复，
+`paginated_archive` 验证真实多页、缺卷、损坏、默认卷数、固定样本与取消；详见 [验证记录](VALIDATION.md)。

@@ -17,22 +17,26 @@ struct Archive5 {
     Bytes encoded;
     uint64_t metadata_issues = 0;
 };
-bool magic(const Bytes& b, const char* value) { return b.size() >= 8 && std::memcmp(b.data(), value, 8) == 0; }
-bool valid_legacy_header(const Bytes& bytes, bool footer) {
-    try {
-        if (magic(bytes, footer ? "RZEND001" : "RZVOL001")) { (void)parse_header(bytes, footer); return true; }
-        if (magic(bytes, footer ? "RZEND002" : "RZVOL002") || magic(bytes, footer ? "RZEND003" : "RZVOL003") ||
-            magic(bytes, footer ? "RZEND004" : "RZVOL004")) { (void)parse_configurable_header(bytes, footer); return true; }
-    } catch (const std::runtime_error&) { return false; }
-    return false;
+// Identify a foreign envelope only if its checksum is intact. A damaged
+// profile 5 magic must still allow recovery from the other metadata copies.
+bool foreign_profile(const Bytes& bytes, const char* prefix) {
+    return bytes.size() >= 8 && std::memcmp(bytes.data(), prefix, 5) == 0
+        && std::all_of(bytes.begin() + 5, bytes.begin() + 8, [](uint8_t c) { return c >= '0' && c <= '9'; })
+        && std::memcmp(bytes.data() + 5, "005", 3) != 0;
 }
 std::optional<Bytes> read_bytes(const File& file, uint64_t offset, size_t size) {
     Bytes bytes(size); if (!file.read(offset, bytes.data(), size)) return std::nullopt; return bytes;
 }
-std::optional<ConfigurableHeader> header(const File& file, bool footer) {
-    if (!file.exists() || file.size() < HeaderSize) return std::nullopt;
-    auto bytes = read_bytes(file, footer ? file.size() - HeaderSize : 0, HeaderSize);
+std::optional<PagedHeader> header(const File& file, bool footer) {
+    const auto size = file.size();
+    if (size < HeaderSize) return std::nullopt;
+    auto bytes = read_bytes(file, footer ? size - HeaderSize : 0, HeaderSize);
     if (!bytes) return std::nullopt;
+    if (foreign_profile(*bytes, footer ? "RZEND" : "RZVOL")) {
+        const auto checksum = hash(bytes->data(), HeaderSize - 32);
+        if (std::equal(checksum.begin(), checksum.end(), bytes->end() - 32))
+            throw std::runtime_error("Unsupported RZ profile (only profile 5 is supported)");
+    }
     try { return parse_paged_header(*bytes, footer); } catch (const std::runtime_error&) { return std::nullopt; }
 }
 uint64_t payload_size(const PagedBootstrap& b) { return (b.layout.data_stripes + b.layout.index_stripes) * PagedRecordSize; }
@@ -50,38 +54,29 @@ Archive5 load(const fs::path& directory) {
     require_directory(directory); Archive5 a; a.directory = fs::canonical(directory);
     bool found = false;
     auto consider = [&](const Bytes& bytes) {
-        bool legacy = false;
-        try {
-            if (magic(bytes, "RZIDX001")) { (void)parse_manifest(bytes); legacy = true; }
-            else if (magic(bytes, "RZIDX002") || magic(bytes, "RZIDX003") || magic(bytes, "RZIDX004")) {
-                (void)parse_configurable_manifest(bytes); legacy = true;
-            }
-        } catch (const std::runtime_error&) {}
-        if (legacy) throw std::runtime_error("Mixed archive IDs or profiles");
+        if (foreign_profile(bytes, "RZIDX"))
+            throw std::runtime_error("Unsupported RZ profile (only profile 5 is supported)");
         std::optional<PagedBootstrap> parsed;
         try { parsed = parse_bootstrap(bytes); } catch (const std::runtime_error&) { return; }
         if (found && bytes != a.encoded) throw std::runtime_error("Conflicting profile 5 bootstraps");
         if (!found) { a.bootstrap = std::move(*parsed); a.encoded = bytes; found = true; }
     };
     File sidecar(a.directory / "manifest.rzm", File::Mode::Read, true);
-    if (sidecar.exists() && sidecar.size() >= 32 && sidecar.size() <= MaxManifest + 32) {
-        auto bytes = read_bytes(sidecar, 0, static_cast<size_t>(sidecar.size()));
+    const auto sidecar_size = sidecar.exists() ? sidecar.size() : 0;
+    if (sidecar_size >= 32 && sidecar_size <= MaxManifest + 32) {
+        auto bytes = read_bytes(sidecar, 0, static_cast<size_t>(sidecar_size));
         if (bytes) {
             Digest digest{}; std::copy(bytes->end()-32, bytes->end(), digest.begin()); bytes->resize(bytes->size()-32);
             if (hash(*bytes) == digest) consider(*bytes);
         }
     }
     std::vector<fs::path> candidates;
-    std::vector<std::pair<fs::path, ConfigurableHeader>> hints;
+    std::vector<std::pair<fs::path, PagedHeader>> hints;
     for (const auto& entry : fs::directory_iterator(a.directory)) {
         if (entry.path().extension() != ".rzv" && entry.path().extension() != ".rzr") continue;
         if (candidates.size() == 200) throw std::runtime_error("Too many profile 5 volumes");
         candidates.push_back(entry.path()); File file(entry.path());
         for (bool footer : {false, true}) {
-            if (file.size() >= HeaderSize) {
-                auto envelope = read_bytes(file, footer ? file.size()-HeaderSize : 0, HeaderSize);
-                if (envelope && valid_legacy_header(*envelope, footer)) throw std::runtime_error("Mixed archive IDs or profiles");
-            }
             auto h = header(file, footer); if (!h) continue;
             hints.emplace_back(entry.path(), *h);
             if (!found) for (auto offset : {uint64_t(HeaderSize), HeaderSize + h->manifest_size + h->payload_size}) {
@@ -92,18 +87,19 @@ Archive5 load(const fs::path& directory) {
     }
     if (!found) throw std::runtime_error("No valid profile 5 bootstrap remains");
     const auto& m = a.bootstrap.manifest; std::set<std::string> names;
-    for (bool parity : {false, true}) for (uint32_t v = 0; v < m.volume_count(parity); ++v) names.insert(configurable_volume_name(parity, v));
+    for (bool parity : {false, true}) for (uint32_t v = 0; v < m.options.volume_count(parity); ++v) names.insert(volume_name(parity, v));
     for (const auto& p : candidates) if (!names.contains(p.filename().string())) throw std::runtime_error("Unexpected profile 5 volume filename");
+    const auto digest = hash(a.encoded);
     for (const auto& [p, h] : hints) {
-        if (h.uuid != m.uuid || h.manifest_hash != hash(a.encoded) || h.manifest_size != a.encoded.size() ||
-            h.payload_size != payload_size(a.bootstrap) || h.volume >= m.volume_count(h.parity) || p.filename() != configurable_volume_name(h.parity, h.volume))
+        if (h.uuid != m.uuid || h.manifest_hash != digest || h.manifest_size != a.encoded.size() ||
+            h.payload_size != payload_size(a.bootstrap) || h.volume >= m.options.volume_count(h.parity) || p.filename() != volume_name(h.parity, h.volume))
             throw std::runtime_error("Mixed archive IDs or conflicting profile 5 volumes");
     }
-    auto expected = a.encoded; auto digest = hash(a.encoded); expected.insert(expected.end(), digest.begin(), digest.end());
+    auto expected = a.encoded; expected.insert(expected.end(), digest.begin(), digest.end());
     auto actual = sidecar.exists() && sidecar.size() == expected.size() ? read_bytes(sidecar, 0, expected.size()) : std::nullopt;
     if (!actual || *actual != expected) ++a.metadata_issues;
-    for (bool parity : {false, true}) for (uint32_t v = 0; v < m.volume_count(parity); ++v) {
-        File file(a.directory / configurable_volume_name(parity, v), File::Mode::Read, true);
+    for (bool parity : {false, true}) for (uint32_t v = 0; v < m.options.volume_count(parity); ++v) {
+        File file(a.directory / volume_name(parity, v), File::Mode::Read, true);
         if (!metadata_ok(file, a, parity, v)) ++a.metadata_issues;
     }
     return a;
@@ -123,7 +119,7 @@ public:
                 files_.erase(oldest);
             }
             const auto k = a_.bootstrap.manifest.options.data_volumes;
-            auto path = a_.directory / configurable_volume_name(column >= k, column >= k ? column-k : column);
+            auto path = a_.directory / volume_name(column >= k, column >= k ? column-k : column);
             it = files_.emplace(column, Cached{std::make_unique<File>(path, mode_, mode_ == File::Mode::Read), 0}).first;
         }
         it->second.age = ++age_; return *it->second.file;
@@ -144,7 +140,7 @@ bool read_record_block(const Archive5& a, VolumeCache& files, bool index, uint32
 }
 Digest local_hash(const Archive5& a, bool index, uint32_t stripe, uint32_t column, const Bytes& block) {
     return index ? index_block_hash(a.bootstrap.manifest.uuid, stripe, column, block)
-                 : block_hash_v2(a.bootstrap.manifest.uuid, stripe, column, block);
+                 : data_block_hash(a.bootstrap.manifest.uuid, stripe, column, block);
 }
 class IndexReader {
 public:
@@ -181,7 +177,7 @@ public:
         // Jerasure owns process-global field state. Index reads normally avoid
         // decoding, but concurrent verification may encounter a late IO failure.
         static std::mutex decode_mutex;
-        { std::lock_guard lock(decode_mutex); ReedSolomon(k, m, 2).decode(blocks, missing); }
+        { std::lock_guard lock(decode_mutex); ReedSolomon(k, m).decode(blocks, missing); }
         return blocks;
     }
 private:
@@ -329,7 +325,7 @@ Verification scan(const Archive5& a, uint32_t requested = 0, ReadProgress* progr
             Bytes block(PagedRecordSize);
             while (!stopped.load(std::memory_order_relaxed)) {
                 const auto column = next.fetch_add(1); if (column >= k+m) break;
-                File file(a.directory/configurable_volume_name(column >= k, column >= k ? column-k : column), File::Mode::Read, true);
+                File file(a.directory/volume_name(column >= k, column >= k ? column-k : column), File::Mode::Read, true);
                 for (uint32_t stripe = 0; stripe < b.layout.data_stripes; ++stripe) {
                     check_cancel(); if (stopped.load(std::memory_order_relaxed)) return;
                     block.resize(PagedRecordSize); Digest local{};
@@ -365,20 +361,7 @@ void write_record(const Archive5& out, VolumeCache& files, bool index, uint32_t 
     file.write(offset+BlockSize, digest.data(), digest.size());
 }
 }
-bool uses_paged_profile(const fs::path& directory) {
-    require_directory(directory); File sidecar(directory/"manifest.rzm", File::Mode::Read, true); Bytes bytes(8);
-    if (sidecar.read(0, bytes.data(), bytes.size()) && magic(bytes, "RZIDX005")) return true;
-    size_t count = 0;
-    for (const auto& entry : fs::directory_iterator(directory)) {
-        if (entry.path().extension() != ".rzv" && entry.path().extension() != ".rzr") continue;
-        if (++count > 2 * MaxPhysicalVolumes) throw std::runtime_error("Too many physical volumes");
-        File file(entry.path());
-        if (file.read(0, bytes.data(), bytes.size()) && magic(bytes, "RZVOL005")) return true;
-        if (file.size() >= HeaderSize && file.read(file.size()-HeaderSize, bytes.data(), bytes.size()) && magic(bytes, "RZEND005")) return true;
-    }
-    return false;
-}
-ConfigurableManifest list_paged_archive(const fs::path& directory, const Password* password) {
+ArchiveManifest list_paged_archive(const fs::path& directory, const Password* password) {
     auto a = load(directory);
     if (!a.bootstrap.manifest.security.encrypted || password) {
         auto keys = authenticate_manifest(a.bootstrap.manifest, password);
@@ -409,14 +392,14 @@ void repair_paged_archive(const fs::path& directory, const fs::path& output) {
     Archive5 out = a; out.directory = stage.path;
     const auto& b = a.bootstrap; const auto k = b.manifest.options.data_volumes, m = b.manifest.options.recovery_volumes;
     for (uint32_t s = 0; s < k+m; ++s) {
-        File file(stage.path/configurable_volume_name(s >= k, s >= k ? s-k : s), File::Mode::New);
+        File file(stage.path/volume_name(s >= k, s >= k ? s-k : s), File::Mode::New);
         file.resize(2*HeaderSize+2*a.encoded.size()+payload_size(b));
     }
     VolumeCache input(a, File::Mode::Read, 2), destination(out, File::Mode::Update, 2);
     auto index_scan = scan_index(a, input);
     if (index_scan.result.unrecoverable_stripes) throw std::runtime_error("Unrecoverable profile 5 index stripe");
     IndexReader index(a, input, &index_scan.forced); Digests digests(a, index); digests.verify_pages();
-    ReedSolomon rs(k, m, 2);
+    ReedSolomon rs(k, m);
     for (uint32_t stripe = 0; stripe < b.layout.index_stripes; ++stripe) {
         auto blocks = index.recover(stripe);
         for (uint32_t s = 0; s < k+m; ++s) write_record(out, destination, true, stripe, s, blocks[s]);
@@ -438,7 +421,7 @@ void repair_paged_archive(const fs::path& directory, const fs::path& output) {
     }
     destination.clear(); input.clear();
     for (uint32_t s = 0; s < k+m; ++s) {
-        File file(stage.path/configurable_volume_name(s >= k, s >= k ? s-k : s), File::Mode::Update);
+        File file(stage.path/volume_name(s >= k, s >= k ? s-k : s), File::Mode::Update);
         auto front = make_paged_header(b, s >= k, s >= k ? s-k : s, false), back = make_paged_header(b, s >= k, s >= k ? s-k : s, true);
         file.write(0, front.data(), front.size()); file.write(HeaderSize, a.encoded.data(), a.encoded.size());
         const auto tail = HeaderSize+a.encoded.size()+payload_size(b);

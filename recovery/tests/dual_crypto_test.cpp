@@ -97,26 +97,7 @@ int main() {
             }
             offset += record.size();
         }
-        rz::Manifest packed; packed.uuid = uuid; packed.stream_size = 128;
-        rz::SecurityInfo info; info.encrypted = true; info.key_slot = slot;
-        info.index_plain_size = 24; info.index_frames.push_back({0, 128, 24});
-        auto manifest = rz::configure(packed, {}, &info); rz::sign_manifest(manifest, wrapped_keys);
-        auto bytes = rz::serialize(manifest);
-        require(rz::serialize(rz::parse_configurable_manifest(bytes)) == bytes, "Dual manifest roundtrip");
-        require(rz::authenticate_manifest(manifest, &pass).has_value(), "Dual manifest MAC");
-        auto changed = manifest; changed.security.public_mac[0] ^= 1;
-        rejects([&] { (void)rz::authenticate_manifest(changed, &pass); });
-        changed = manifest; changed.security.key_slot.suite = 1; changed.security.key_slot.wrapped_key.resize(48);
-        rejects([&] { (void)rz::authenticate_manifest(changed, &pass); });
-        auto unknown = bytes; unknown[unknown.size() - 200] = 99;
-        rejects([&] { (void)rz::parse_configurable_manifest(unknown); });
-        auto excessive = bytes; excessive[excessive.size() - 196] ^= 255;
-        rejects([&] { (void)rz::parse_configurable_manifest(excessive); });
-        for (size_t i = 0; i < bytes.size(); ++i) {
-            rz::Bytes truncated(bytes.begin(), bytes.begin() + i);
-            rejects([&] { (void)rz::parse_configurable_manifest(truncated); });
-        }
-        std::cout << "AES vector, dual wrapping, both record tags, nonce reuse guard, suite binding and manifest authentication passed\n";
+        std::cout << "AES vector, dual wrapping, both record tags, nonce reuse guard, suite binding passed\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

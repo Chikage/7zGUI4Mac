@@ -15,7 +15,7 @@ uint8_t inverse(uint8_t value) {
     for (int i = 0; i < 254; ++i) result = multiply(result, value);
     return result;
 }
-rz::Digest old_block_hash(const rz::UUID& uuid, uint32_t group, uint32_t shard, const rz::Bytes& block) {
+rz::Digest reference_block_hash(const rz::UUID& uuid, uint32_t group, uint32_t shard, const rz::Bytes& block) {
     rz::Bytes bytes{'r','z','-','b','l','o','c','k','-','v','2'};
     bytes.insert(bytes.end(), uuid.begin(), uuid.end());
     for (uint32_t value : {group, shard})
@@ -24,14 +24,14 @@ rz::Digest old_block_hash(const rz::UUID& uuid, uint32_t group, uint32_t shard, 
 }
 void golden(bool race_check) {
     rz::RecoveryEncoder encoder;
-    for (auto [k, m] : {std::pair<uint32_t, uint32_t>{1, 1}, {7, 3}, {100, 1}, {100, 20}, {100, 100}, {1, 128}}) {
+    for (auto [k, m] : {std::pair<uint32_t, uint32_t>{1, 1}, {7, 3}, {100, 1}, {100, 20}, {100, 100}}) {
         if (race_check && k == 100 && m == 100) continue;
         std::vector<rz::Bytes> blocks(k + m, rz::Bytes(rz::BlockSize));
         for (uint32_t c = 0; c < k; ++c)
             for (uint32_t i = 0; i < rz::BlockSize; ++i) blocks[c][i] = static_cast<uint8_t>(i * 31 + c * 17);
-        auto legacy = blocks; rz::ReedSolomon(k, m, 2).encode(legacy);
+        auto serial = blocks; rz::ReedSolomon(k, m).encode(serial);
         encoder.encode(k, m, blocks);
-        require(blocks == legacy, "parity must match Jerasure byte for byte");
+        require(blocks == serial, "parity must match Jerasure byte for byte");
         for (uint32_t r = 0; r < m; ++r) {
             std::array<uint8_t, 256> expected{};
             for (uint32_t c = 0; c < k; ++c) {
@@ -43,7 +43,7 @@ void golden(bool race_check) {
         }
         // A second use must overwrite old parity rather than XOR it twice.
         if (!race_check || k <= 7) {
-            encoder.encode(k, m, blocks); require(blocks == legacy, "reusable context resets parity output");
+            encoder.encode(k, m, blocks); require(blocks == serial, "reusable context resets parity output");
         }
         bool rejected = false; std::stop_source stop; stop.request_stop();
         try { encoder.encode(k, m, blocks, stop.get_token()); } catch (const std::runtime_error&) { rejected = true; }
@@ -71,84 +71,80 @@ void pools(bool race_check) {
     // Counted-volume scheduling uses K+M to account for memory and amortizes
     // automatic workers over useful work, rather than spawning per physical file.
     for (uint32_t k : {1U, 4U, 100U}) {
-        std::vector<rz::CodingGroup> groups(128, {k, k, {}});
-        rz::RecoveryPool pool(source, uint64_t(128) * k * rz::BlockSize - 17, uuid, groups, 64, true);
+        rz::RecoveryPool pool(source, uint64_t(128) * k * rz::BlockSize - 17, uuid, k, k, 64);
         require(pool.limits().estimated_bytes <= rz::RecoveryMemoryBudget, "counted worker memory cap");
         if (k == 100) require(pool.limits().workers < 64, "wide counted stripes reduce parallelism");
     }
     {
-        std::vector<rz::CodingGroup> groups(1, {10, 2, {}});
-        rz::RecoveryPool pool(source, 17, uuid, groups, 0, true);
+        rz::RecoveryPool pool(source, 17, uuid, 10, 2);
         require(pool.limits().workers == 1, "one padded stripe starts one worker");
         pool.submit_next(); auto job = pool.take();
         for (uint32_t s = 1; s < 10; ++s)
             require(std::all_of(job->blocks[s].begin(), job->blocks[s].end(), [](auto b) { return b == 0; }), "unused data shards are zero padded");
     }
-    for (uint64_t percent : {100, 2000, 10000}) {
-        if (race_check && percent == 10000) continue;
-        rz::Manifest packed; packed.uuid = uuid; packed.stream_size = size;
-        auto manifest = rz::configure(std::move(packed), {1024 * 1024, rz::RecoveryMode::Percent, percent});
+    constexpr uint32_t k = 100;
+    const auto stripes = (size + k * rz::BlockSize - 1) / (k * rz::BlockSize);
+    for (uint32_t m : {1U, 20U, 100U}) {
+        if (race_check && m == 100) continue;
         for (uint32_t threads : {1U, 4U, 0U}) {
-            if (race_check && percent == 2000 && threads != 4) continue;
-            rz::RecoveryPool pool(source, size, uuid, manifest.groups, threads);
+            if (race_check && m == 20 && threads != 4) continue;
+            rz::RecoveryPool pool(source, size, uuid, k, m, threads);
             require(pool.limits().estimated_bytes <= rz::RecoveryMemoryBudget, "recovery memory budget");
-            require(pool.limits().workers <= manifest.groups.size(), "workers capped by useful group count");
-            size_t submitted = 0, completed = 0; uint64_t data_start = 0, parity_start = 0;
+            require(pool.limits().workers <= stripes, "workers capped by useful group count");
+            size_t submitted = 0, completed = 0;
             auto take = [&] {
                 auto job = pool.take();
-                require(job->index == completed && job->data_start == data_start && job->parity_start == parity_start, "ordered group offsets");
-                std::vector<rz::Bytes> expected(job->k + job->m, rz::Bytes(rz::BlockSize));
-                for (uint32_t s = 0; s < job->k; ++s) {
-                    const auto offset = (data_start + s) * rz::BlockSize;
+                require(job->index == completed, "ordered stripes");
+                std::vector<rz::Bytes> expected(k + m, rz::Bytes(rz::BlockSize));
+                for (uint32_t s = 0; s < k; ++s) {
+                    const auto offset = (completed * k + s) * rz::BlockSize;
+                    if (offset >= size) break;
                     const auto length = std::min<uint64_t>(rz::BlockSize, size - offset);
                     require(source.read(offset, expected[s].data(), length), "oracle source read");
                 }
-                rz::ReedSolomon(job->k, job->m, 2).encode(expected);
+                rz::ReedSolomon(k, m).encode(expected);
                 require(job->blocks == expected, "pool payload matches the serial encoder including zero padding");
                 for (uint32_t s = 0; s < expected.size(); ++s)
-                    require(job->hashes[s] == old_block_hash(uuid, job->index, s, expected[s]), "block digest domain and identity");
-                // Reconstruct selected erasures with the legacy decoder. Full
+                    require(job->hashes[s] == reference_block_hash(uuid, job->index, s, expected[s]), "block digest domain and identity");
+                // Reconstruct selected erasures with the serial decoder. Full
                 // budget reconstruction is covered by the archive fault tests.
                 std::vector<int> missing;
-                for (uint32_t s = 0; s < std::min(job->m, 3U); ++s) { missing.push_back(s); std::fill(expected[s].begin(), expected[s].end(), 0); }
-                rz::ReedSolomon(job->k, job->m, 2).decode(expected, missing);
-                require(expected == job->blocks, "legacy decode of parallel parity");
-                data_start += job->k; parity_start += job->m; ++completed;
+                for (uint32_t s = 0; s < std::min(m, 3U); ++s) { missing.push_back(s); std::fill(expected[s].begin(), expected[s].end(), 0); }
+                rz::ReedSolomon(k, m).decode(expected, missing);
+                require(expected == job->blocks, "serial decode of parallel parity");
+                ++completed;
             };
             while (!pool.full()) { pool.submit_next(); ++submitted; }
             bool rejected = false;
             try { pool.submit_next(); } catch (const std::runtime_error&) { rejected = true; }
             require(rejected, "completed groups must still occupy queue slots");
-            while (submitted < manifest.groups.size()) { take(); pool.submit_next(); ++submitted; }
+            while (submitted < stripes) { take(); pool.submit_next(); ++submitted; }
             while (!pool.empty()) take();
-            require(completed == manifest.groups.size() && pool.peak_jobs() <= pool.limits().slots, "bounded queue completion");
+            require(completed == stripes && pool.peak_jobs() <= pool.limits().slots, "bounded queue completion");
         }
     }
     // Budget cap under the most expensive geometry, without allocating the data.
-    std::vector<rz::CodingGroup> many(100, {100, 100, {}});
     {
-        rz::RecoveryPool pool(source, 10000ULL * rz::BlockSize, uuid, many, 64);
+        rz::RecoveryPool pool(source, 10000ULL * rz::BlockSize, uuid, 100, 100, 64);
         require(pool.limits().workers < 64 && pool.limits().estimated_bytes <= rz::RecoveryMemoryBudget, "large thread request memory cap");
     }
     bool failed = false;
     try {
-        rz::RecoveryPool pool(source, 10000ULL * rz::BlockSize, uuid, many, 4);
+        rz::RecoveryPool pool(source, 10000ULL * rz::BlockSize, uuid, 100, 100, 4);
         for (int i = 0; i < 8; ++i) pool.submit_next();
         while (!pool.empty()) (void)pool.take();
     } catch (const std::runtime_error& error) { failed = std::string(error.what()) == "Compressed spool is truncated"; }
     require(failed, "worker read error must cancel peers and reach coordinator");
     {
-        rz::Manifest packed; packed.stream_size = size;
-        auto m = rz::configure(std::move(packed), {1024 * 1024, rz::RecoveryMode::Percent, 10000});
-        rz::RecoveryPool pool(source, size, uuid, m.groups, 4);
-        for (size_t i = 0; i < m.groups.size(); ++i) pool.submit_next();
+        rz::RecoveryPool pool(source, size, uuid, k, 100, 4);
+        for (size_t i = 0; i < stripes; ++i) pool.submit_next();
         rz::interrupted.store(SIGINT); failed = false;
         try { (void)pool.take(); } catch (const std::runtime_error&) { failed = true; }
         require(failed, "signal cancellation during group work");
     }
     rz::interrupted.store(0);
     // Coordinator abandonment (for example a failed volume write) joins peers.
-    { rz::RecoveryPool pool(source, 10000ULL * rz::BlockSize, uuid, many, 4); pool.submit_next(); pool.submit_next(); }
+    { rz::RecoveryPool pool(source, 10000ULL * rz::BlockSize, uuid, 100, 100, 4); pool.submit_next(); pool.submit_next(); }
 }
 }
 int main(int argc, char** argv) {

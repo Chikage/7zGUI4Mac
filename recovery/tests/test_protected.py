@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Encryption, keyless repair, filesystem metadata, and backward compatibility."""
+"""Encryption, keyless repair, and filesystem metadata."""
 import ctypes
 import hashlib
 import json
@@ -12,7 +12,6 @@ import stat
 import struct
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 import unittest
@@ -82,7 +81,7 @@ class ProtectedTest(unittest.TestCase):
         os.utime(cls.note, ns=(1500000000111222333, 1600000000444555666))
         cls.modified = cls.note.stat().st_mtime_ns
         cls.archive = cls.root / 'encrypted.rz'
-        run('create', cls.source, cls.archive, '--encrypt', '--password-stdin', '--volume-size', '1MiB', password=PASSWORD)
+        run('create', cls.source, cls.archive, '--encrypt', '--password-stdin', password=PASSWORD)
         cls.expected = contents(cls.source)
 
     @classmethod
@@ -107,7 +106,7 @@ class ProtectedTest(unittest.TestCase):
         unlocked = json.loads(run('list', self.archive, '--json', '--password-stdin', password=PASSWORD).stdout)
         self.assertFalse(unlocked['locked'])
         self.assertEqual(unlocked['encryptionSuite'], 2 if DUAL else 1)
-        self.assertTrue(all(p.stat().st_size <= 1024 * 1024 for p in self.archive.glob('*.rz[vr]')))
+        self.assertTrue(all(p.stat().st_size == unlocked['recovery']['volumeSizeBytes'] for p in self.archive.glob('*.rz[vr]')))
         self.assertTrue(any('private-name' in e['path'] for e in unlocked['entries']))
         out = self.work / 'out'; self.extract(self.archive, out)
         note = out / 'folder' / self.note.name
@@ -166,7 +165,7 @@ class ProtectedTest(unittest.TestCase):
 
     def test_nonce_and_salt_randomize_repeated_archives(self):
         other = self.work / 'other'
-        run('create', self.source, other, '--encrypt', '--password-stdin', '--volume-size', '1MiB', password=PASSWORD)
+        run('create', self.source, other, '--encrypt', '--password-stdin', password=PASSWORD)
         self.assertNotEqual((other / 'manifest.rzm').read_bytes(), (self.archive / 'manifest.rzm').read_bytes())
         self.assertNotEqual((other / 'd000000.rzv').read_bytes(), (self.archive / 'd000000.rzv').read_bytes())
 
@@ -251,32 +250,11 @@ class ProtectedTest(unittest.TestCase):
         run('extract', archive, self.work / 'out', '--password-stdin', password=PASSWORD)
         self.assertEqual(list((self.work / 'out').iterdir()), [])
 
-    def test_legacy_fixed_fixtures_remain_readable(self):
-        for profile, filename in [(1, 'legacy.txt'), (2, 'legacy2.txt')]:
-            archive = self.work / f'legacy-{profile}'; archive.mkdir()
-            with tarfile.open(Path(__file__).parent / 'fixtures' / f'profile{profile}.tar.gz') as f:
-                for member in f.getmembers():
-                    self.assertTrue(member.isfile() and '/' not in member.name)
-                    (archive / member.name).write_bytes(f.extractfile(member).read())
-            run('verify', archive); run('extract', archive, self.work / f'out-{profile}')
-            self.assertIn('compatibility fixture', (self.work / f'out-{profile}' / filename).read_text())
-
-    def test_frozen_standard_encryption_fixture(self):
-        archive = self.work / 'standard'; archive.mkdir()
-        with tarfile.open(Path(__file__).parent / 'fixtures' / 'profile3-standard.tar.gz') as f:
-            for member in f.getmembers():
-                self.assertTrue(member.isfile() and '/' not in member.name)
-                (archive / member.name).write_bytes(f.extractfile(member).read())
-        run('verify', archive, '--password-stdin', password='fixture-password')
-        run('extract', archive, self.work / 'standard-out', '--password-stdin', password='fixture-password')
-        self.assertIn('compatibility fixture', (self.work / 'standard-out' / 'legacy3.txt').read_text())
-
     def test_invalid_encryption_options_and_password_limits(self):
         for args, data, code in [(['--encrypt'], None, 1), (['--encryption', 'dual'], None, 1),
                                 (['--encrypt','--password-stdin','--encryption','unknown'], 'unused', 1), (['--password-stdin'], 'unused', 1),
                                 (['--encrypt','--password-stdin'], '', 4),
-                                (['--encrypt','--password-stdin'], 'a'*1025, 1),
-                                (['--profile','2','--encrypt','--password-stdin'], 'unused', 1)]:
+                                (['--encrypt','--password-stdin'], 'a'*1025, 1)]:
             run('create', self.source, self.work / 'bad', *args, password=data, code=code)
             self.assertFalse((self.work / 'bad').exists())
 

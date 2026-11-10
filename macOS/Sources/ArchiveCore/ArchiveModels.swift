@@ -105,22 +105,12 @@ public enum RecoveryEncryption: Int, CaseIterable, Identifiable, Sendable {
     var argument: String { self == .standard ? "standard" : "dual" }
 }
 
-public enum CountedRecoveryProfile: Int, Sendable {
-    case compatible = 4
-    case paged = 5
-}
-
 public struct CompressionOptions: Sendable {
     public var format: ArchiveFormat
     public var level: Int
     public var password: String
     public var encryptNames: Bool
-    public var recoveryVolumeSizeBytes: Int64
-    public var recoveryPayload: RecoveryPayload
-    /// Counted, equal-sized volumes. Nil retains the legacy size/budget API.
-    public var recoveryVolumeCounts: RecoveryVolumeCounts?
-    /// New counted archives use the protected paginated index. Ignored by the legacy size/budget API.
-    public var countedRecoveryProfile: CountedRecoveryProfile
+    public var recoveryVolumeCounts: RecoveryVolumeCounts
     public var preserveMetadata: Bool
     public var recoveryEncryption: RecoveryEncryption
     public var generateRecoveryKeyFile: Bool
@@ -129,20 +119,16 @@ public struct CompressionOptions: Sendable {
     public init(
         format: ArchiveFormat = .sevenZip, level: Int = 5,
         password: String = "", encryptNames: Bool = true,
-        recoveryVolumeSizeBytes: Int64 = 64 * 1024 * 1024,
-        recoveryPayload: RecoveryPayload = .percentage(basisPoints: 2000), preserveMetadata: Bool = true,
+        preserveMetadata: Bool = true,
         recoveryEncryption: RecoveryEncryption = .standard, generateRecoveryKeyFile: Bool = false,
-        recoveryVolumeCounts: RecoveryVolumeCounts? = nil, countedRecoveryProfile: CountedRecoveryProfile = .paged,
+        recoveryVolumeCounts: RecoveryVolumeCounts = RecoveryVolumeCounts(),
         rar: RAROptions = RAROptions(), deleteSourcesAfterVerification: Bool = false
     ) {
         self.format = format
         self.level = level
         self.password = password
         self.encryptNames = encryptNames
-        self.recoveryVolumeSizeBytes = recoveryVolumeSizeBytes
-        self.recoveryPayload = recoveryPayload
         self.recoveryVolumeCounts = recoveryVolumeCounts
-        self.countedRecoveryProfile = countedRecoveryProfile
         self.preserveMetadata = preserveMetadata
         self.recoveryEncryption = recoveryEncryption
         self.generateRecoveryKeyFile = generateRecoveryKeyFile

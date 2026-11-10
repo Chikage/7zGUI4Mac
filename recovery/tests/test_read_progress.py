@@ -28,28 +28,24 @@ def records(result):
 
 class ReadProgressTests(unittest.TestCase):
     def test_creation_verification_progress(self):
-        for profile in (3, 4, 5):
-            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                source = root / 'source'
-                source.mkdir()
-                data = b'creation verification\n' * 750_000
-                (source / 'content.bin').write_bytes(data)
-                options = ['--profile', profile, '--no-metadata', '--progress']
-                if profile >= 4:
-                    options += ['--data-volumes', 2, '--recovery-volumes', 1]
-                result = run('create', source, root / 'archive', *options)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                rows = records(result)
-                self.assertTrue(any(r[1] == 'storage' and int(r[3]) > 0 for r in rows))
-                self.assertTrue(any(r[1] == 'checking' and 0 < int(r[2]) < len(data) for r in rows))
-                self.assertNotIn('content.bin', result.stderr)
-                self.assertNotIn('RZREADPROGRESS1', result.stdout)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'source'
+            source.mkdir()
+            data = b'creation verification\n' * 750_000
+            (source / 'content.bin').write_bytes(data)
+            options = ['--no-metadata', '--progress', '--data-volumes', 2, '--recovery-volumes', 1]
+            result = run('create', source, root / 'archive', *options)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rows = records(result)
+            self.assertTrue(any(r[1] == 'storage' and int(r[3]) > 0 for r in rows))
+            self.assertTrue(any(r[1] == 'checking' and 0 < int(r[2]) < len(data) for r in rows))
+            self.assertNotIn('content.bin', result.stderr)
+            self.assertNotIn('RZREADPROGRESS1', result.stdout)
 
-    def test_all_profiles_and_encrypted_reads(self):
-        for profile, encrypted in [(1, False), (2, False), (3, False), (4, False),
-                                   (5, False), (3, True), (4, True), (5, True)]:
-            with self.subTest(profile=profile, encrypted=encrypted), tempfile.TemporaryDirectory() as tmp:
+    def test_plain_and_encrypted_reads(self):
+        for encrypted in (False, True):
+            with self.subTest(encrypted=encrypted), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 source = root / 'source'
                 source.mkdir()
@@ -58,9 +54,7 @@ class ReadProgressTests(unittest.TestCase):
                 (source / 'empty').touch()
                 (source / 'folder').mkdir()
                 archive = root / 'archive'
-                options = ['--profile', profile, '--no-metadata']
-                if profile >= 4:
-                    options += ['--data-volumes', 2, '--recovery-volumes', 1]
+                options = ['--no-metadata', '--data-volumes', 2, '--recovery-volumes', 1]
                 if encrypted:
                     options += ['--encrypt', '--password-stdin']
                 password = 'private-progress-password\n' if encrypted else None
@@ -80,11 +74,10 @@ class ReadProgressTests(unittest.TestCase):
                     self.assertEqual(rows[-1][2], rows[-1][3])
                     self.assertNotIn('private-progress-password', result.stderr)
                     self.assertNotIn('content.bin', result.stderr)
-                    if command == 'extract' or profile >= 3:
-                        self.assertEqual(int(rows[-1][3]), len(data))
-                        self.assertEqual(rows[-1][4:6], ['2', '2'])
-                        self.assertTrue(any(0 < int(r[2]) < int(r[3])
-                                            for r in rows if r[1] in ('extracting', 'checking')))
+                    self.assertEqual(int(rows[-1][3]), len(data))
+                    self.assertEqual(rows[-1][4:6], ['2', '2'])
+                    self.assertTrue(any(0 < int(r[2]) < int(r[3])
+                                        for r in rows if r[1] in ('extracting', 'checking')))
                     if command == 'extract':
                         self.assertTrue(json.loads(result.stdout)['outputPublished'])
                         self.assertEqual((root / 'out/content.bin').read_bytes(), data)

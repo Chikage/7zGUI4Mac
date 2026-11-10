@@ -34,7 +34,7 @@ private:
                     if (files_[i] && (oldest == files_.size() || ages_[i] < ages_[oldest])) oldest = i;
                 files_[oldest].reset(); --opened_;
             }
-            files_[column] = std::make_unique<File>(directory_ / configurable_volume_name(column >= k_, column >= k_ ? column - k_ : column), File::Mode::Append);
+            files_[column] = std::make_unique<File>(directory_ / volume_name(column >= k_, column >= k_ ? column - k_ : column), File::Mode::Append);
             ++opened_;
         }
         ages_[column] = ++age_; return *files_[column];
@@ -86,7 +86,7 @@ size_t finalize_volumes(const fs::path& directory, const PagedBootstrap& bootstr
             while (!stopped.load(std::memory_order_relaxed)) {
                 const auto column = next.fetch_add(1); if (column >= count) break;
                 const bool parity = column >= k; const auto volume = parity ? column - k : column;
-                File file(directory / configurable_volume_name(parity, volume), File::Mode::Update);
+                File file(directory / volume_name(parity, volume), File::Mode::Update);
                 const auto end = HeaderSize + encoded.size() + payload_size;
                 if (file.size() != end) throw std::runtime_error("Profile 5 staged payload size changed");
                 file.write(0, make_paged_header(bootstrap, parity, volume, false)); file.write(HeaderSize, encoded);
@@ -108,8 +108,7 @@ size_t finalize_volumes(const fs::path& directory, const PagedBootstrap& bootstr
 }
 void create_paged_archive(const InputPlan& plan, const fs::path& output, const RecoveryOptions& options,
                           const SecurityOptions& security, bool report_progress, uint32_t threads) {
-    validate_options(options);
-    if (options.mode != RecoveryMode::Volumes) throw std::runtime_error("Profile 5 requires counted volumes");
+    validate_volume_counts(options.data_volumes, options.recovery_volumes);
     if (security.generate_key_file) {
         if (!security.encrypt || !security.password || !security.password->from_key_file) throw KeyFileError();
         if (fs::exists(fs::symlink_status(recovery_key_path(output)))) throw std::runtime_error("Recovery key file already exists");
@@ -120,18 +119,18 @@ void create_paged_archive(const InputPlan& plan, const fs::path& output, const R
     CreationTiming timing; const auto started = TimingClock::now(); auto phase_start = started;
     PagedBootstrap bootstrap; auto& manifest = bootstrap.manifest; std::optional<ArchiveKeys> keys;
     {
-        auto packed = pack_protected(plan, spool_path, security, &progress, threads, MaxPagedOutput);
+        auto packed = pack_protected(plan, spool_path, security, &progress, threads);
         manifest.uuid = packed.packed.uuid; manifest.stream_size = packed.packed.stream_size;
         manifest.security = std::move(packed.security); keys = std::move(packed.keys);
     }
     manifest.options = options;
     const auto k = options.data_volumes, m = options.recovery_volumes;
     bootstrap.index_volume_hashes.resize(k + m);
-    bootstrap.layout = paged_layout(manifest.stream_size, k, m); update_paged_summary(bootstrap);
+    bootstrap.layout = paged_layout(manifest.stream_size, k, m);
     const auto reserved_bootstrap = serialize_bootstrap(bootstrap).size();
     timing.packing = elapsed_ns(phase_start); phase_start = TimingClock::now(); progress.phase("recovery");
     for (uint32_t column = 0; column < k + m; ++column) {
-        File file(staging.path / configurable_volume_name(column >= k, column >= k ? column - k : column), File::Mode::New);
+        File file(staging.path / volume_name(column >= k, column >= k ? column - k : column), File::Mode::New);
         file.resize(HeaderSize + reserved_bootstrap);
     }
     PayloadFiles payloads(staging.path, k, m);

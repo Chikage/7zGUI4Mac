@@ -1,15 +1,11 @@
 #include "format.hpp"
 #include "binary.hpp"
-#include <algorithm>
-#include <cstring>
 #include <iomanip>
 #include <map>
 #include <sstream>
 #include <stdexcept>
 
 namespace rz {
-using binary::Writer;
-using binary::Reader;
 void validate_path(const std::string& path) {
     if (path.empty() || path.size() > 4096 || path.front() == '/' || path.back() == '/')
         throw std::runtime_error("Unsafe archive path");
@@ -40,71 +36,9 @@ void validate_path(const std::string& path) {
         start = end + 1;
     }
 }
-Bytes serialize(const Manifest& m) {
-    Writer w;
-    w.raw("RZIDX001", 8); w.raw(m.uuid.data(), 16);
-    for (auto v : {1U, BlockSize, FrameSize, K, M}) w.u32(v);
-    w.u64(m.stream_size); w.u32(static_cast<uint32_t>(m.groups.size()));
-    for (const auto& g : m.groups) {
-        w.u32(g.stripes); w.u64(g.valid);
-        for (const auto& h : g.hashes) w.raw(h.data(), h.size());
-    }
-    binary::write_entries(w, m.entries);
-    if (w.b.size() > MaxManifest) throw std::runtime_error("Manifest exceeds limit");
-    return w.b;
-}
-Manifest parse_manifest(const Bytes& b) {
-    if (b.size() > MaxManifest) throw std::runtime_error("Manifest exceeds limit");
-    Reader r{b}; Manifest m;
-    r.magic("RZIDX001"); r.raw(m.uuid.data(), 16);
-    for (auto expected : {1U, BlockSize, FrameSize, K, M})
-        if (r.u32() != expected) throw std::runtime_error("Unsupported coding profile");
-    m.stream_size = r.u64();
-    if (m.stream_size > MaxOutput + MaxOutput / 100) throw std::runtime_error("Stream exceeds phase-one limit");
-    auto groups = r.u32();
-    if (groups == 0 || groups > 4096) throw std::runtime_error("Invalid group count");
-    uint64_t valid = 0;
-    for (uint32_t i = 0; i < groups; ++i) {
-        Group g; g.stripes = r.u32(); g.valid = r.u64();
-        if (g.stripes == 0 || g.span() > MaxVolume || g.valid > g.span() * K ||
-            g.stripes != std::max<uint64_t>(1, (g.valid + K * BlockSize - 1) / (K * BlockSize)) ||
-            (g.valid == 0 && (groups != 1 || m.stream_size != 0))) throw std::runtime_error("Invalid group geometry");
-        uint64_t count = uint64_t(g.stripes) * N;
-        if (count > (b.size() - r.p) / 32) throw std::runtime_error("Truncated block hash table");
-        g.hashes.resize(static_cast<size_t>(count));
-        for (auto& h : g.hashes) r.raw(h.data(), 32);
-        valid += g.valid; m.groups.push_back(std::move(g));
-    }
-    if (valid != m.stream_size) throw std::runtime_error("Invalid stream geometry");
-    m.entries = binary::read_entries(r, m.stream_size);
-    r.end(); return m;
-}
-Bytes make_header(const Header& h, bool footer) {
-    Writer w;
-    w.raw(footer ? "RZEND001" : "RZVOL001", 8); w.u32(1); w.u32(h.shard < K ? 0 : 1);
-    w.raw(h.uuid.data(), 16); w.u32(h.group); w.u32(h.shard);
-    w.u64(h.manifest_size); w.u64(h.payload_size); w.raw(h.manifest_hash.data(), 32);
-    auto digest = hash(w.b); w.raw(digest.data(), 32); return w.b;
-}
-Header parse_header(const Bytes& b, bool footer) {
-    if (b.size() != HeaderSize || hash(b.data(), HeaderSize - 32) != [&] {
-        Digest d{}; std::copy(b.end() - 32, b.end(), d.begin()); return d; }())
-        throw std::runtime_error("Bad volume header checksum");
-    Reader r{b}; Header h;
-    r.magic(footer ? "RZEND001" : "RZVOL001");
-    if (r.u32() != 1) throw std::runtime_error("Unsupported volume version");
-    auto kind = r.u32(); r.raw(h.uuid.data(), 16); h.group = r.u32(); h.shard = r.u32();
-    h.manifest_size = r.u64(); h.payload_size = r.u64(); r.raw(h.manifest_hash.data(), 32);
-    if (h.group >= 4096 || h.shard >= N || kind != (h.shard < K ? 0U : 1U) ||
-        h.manifest_size == 0 || h.manifest_size > MaxManifest || h.payload_size == 0 ||
-        h.payload_size > MaxVolume || h.payload_size % BlockSize != 0)
-        throw std::runtime_error("Invalid volume geometry");
-    return h;
-}
-std::string volume_name(uint32_t group, uint32_t shard) {
+std::string volume_name(bool parity, uint32_t index) {
     std::ostringstream s;
-    s << 'g' << std::setfill('0') << std::setw(6) << group << '.' << (shard < K ? 'd' : 'p')
-      << std::setw(2) << (shard < K ? shard : shard - K) << (shard < K ? ".rzv" : ".rzr");
+    s << (parity ? 'p' : 'd') << std::setfill('0') << std::setw(6) << index << (parity ? ".rzr" : ".rzv");
     return s.str();
 }
 }
@@ -118,7 +52,7 @@ void write_entries(Writer& w, const std::vector<Entry>& entries) {
         for (const auto& f : e.frames) { w.u64(f.offset); w.u32(f.stored); w.u32(f.plain); }
     }
 }
-std::vector<Entry> read_entries(Reader& r, uint64_t stream_size, uint64_t initial_offset, uint64_t max_output) {
+std::vector<Entry> read_entries(Reader& r, uint64_t stream_size, uint64_t initial_offset) {
     const auto& b = r.b;
     std::vector<Entry> result;
     auto entries = r.u32();
@@ -140,7 +74,7 @@ std::vector<Entry> read_entries(Reader& r, uint64_t stream_size, uint64_t initia
         }
         paths.emplace(e.path, e.directory);
         e.size = r.u64(); r.raw(e.digest.data(), 32);
-        if (e.size > max_output - output_size) throw std::runtime_error("Output exceeds profile content limit");
+        if (e.size > MaxOutput - output_size) throw std::runtime_error("Output exceeds profile content limit");
         output_size += e.size;
         auto frames = r.u32();
         if (frames > (b.size() - r.p) / 16 || frames != (e.size + FrameSize - 1) / FrameSize)

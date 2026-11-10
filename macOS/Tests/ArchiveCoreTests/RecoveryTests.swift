@@ -6,7 +6,7 @@ import Testing
 @Test func recoveryFormatCapabilities() {
     #expect(ArchiveFormat.recovery.supportsPassword)
     #expect(!ArchiveFormat.recovery.supportsCompressionLevel)
-    #expect(CompressionOptions(format: .recovery).recoveryVolumeSizeBytes == 64 * 1024 * 1024)
+    #expect(CompressionOptions(format: .recovery).recoveryVolumeCounts == .init(data: 10, recovery: 2))
     #expect(ArchiveFormat.allCases.contains(.recovery))
 }
 
@@ -20,20 +20,19 @@ import Testing
     let output = fixture.root.appendingPathComponent("selected.rz", isDirectory: true)
     _ = try await fixture.service.compress(
         [left, right, quoted, left], to: output,
-        options: CompressionOptions(format: .recovery, recoveryVolumeSizeBytes: 3 * 1024 * 1024))
+        options: CompressionOptions(format: .recovery))
     let volumes = try FileManager.default.contentsOfDirectory(
         at: output, includingPropertiesForKeys: [.fileSizeKey]
     ).filter { ["rzv", "rzr"].contains($0.pathExtension) }
-    #expect(volumes.count == 2)
-    #expect(try volumes.allSatisfy { try $0.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0 <= 3 * 1024 * 1024 })
+    #expect(volumes.count == 12)
     let listing = try await fixture.service.list(output)
     #expect(listing.supportsRecovery)
     #expect(!listing.isEncrypted)
     #expect(listing.physicalSize > 0)
-    #expect(listing.recoveryDetails?.profile == 3)
+    #expect(listing.recoveryDetails?.profile == 5)
     #expect(listing.preservesMetadata)
     let details = try #require(listing.recoveryDetails)
-    #expect(details.volumeLimitBytes == 3_145_728)
+    #expect(try volumes.allSatisfy { Int64(try $0.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) == details.volumeSizeBytes })
     #expect(
         Set(listing.entries.filter { !$0.isDirectory }.map(\.path)) == [
             "left/same.txt", "right/same.txt", "资料/含\"引号.txt",
@@ -42,73 +41,6 @@ import Testing
     _ = try await fixture.service.extract(output, to: extracted)
     #expect(try String(contentsOf: extracted.appendingPathComponent("left/same.txt"), encoding: .utf8) == "left")
     #expect(try String(contentsOf: extracted.appendingPathComponent("right/same.txt"), encoding: .utf8) == "right")
-}
-
-@Test func customRecoveryInputsUseExactUnits() throws {
-    #expect(try RecoveryInput.volumeBytes("1.5", unit: .mib) == 1_572_864)
-    #expect(try RecoveryInput.volumeBytes("1.25", unit: .gib) == 1_342_177_280)
-    #expect(try RecoveryInput.volumeBytes("16", unit: .gib) == 17_179_869_184)
-    #expect(try RecoveryInput.sizeBytes("500", unit: .kib) == 512_000)
-    #expect(try RecoveryInput.percentage("7.5") == .percentage(basisPoints: 750))
-    #expect(try RecoveryInput.percentage("33.33").arguments() == ["--recovery-percent", "33.33"])
-    #expect(try RecoveryPayload.bytes(512_000).arguments() == ["--recovery-bytes", "512000"])
-    for text in ["", "0", "-1", "NaN", "1e3", "1,000", "1.2.3", "0.5", "16385"] {
-        #expect(throws: ArchiveError.self) { try RecoveryInput.volumeBytes(text, unit: .mib) }
-    }
-    for text in ["0", "0.5", "100.01", "7.123", "inf", ""] {
-        #expect(throws: ArchiveError.self) { try RecoveryInput.percentage(text) }
-    }
-}
-
-@Test func customRecoveryPayloadRoundTrip() async throws {
-    let fixture = try Fixture()
-    defer { fixture.cleanup() }
-    let file = try fixture.file("random.bin", contents: "")
-    var value: UInt64 = 0x1234_5678_9abc_def0
-    var data = Data(capacity: 2 * 1024 * 1024)
-    for _ in 0..<(2 * 1024 * 1024) {
-        value ^= value << 13
-        value ^= value >> 7
-        value ^= value << 17
-        data.append(UInt8(truncatingIfNeeded: value))
-    }
-    try data.write(to: file)
-    for (index, payload) in [RecoveryPayload.percentage(basisPoints: 750), .bytes(500 * 1024)].enumerated() {
-        let archive = fixture.root.appendingPathComponent("custom-\(index).rz", isDirectory: true)
-        _ = try await fixture.service.compress(
-            [file], to: archive,
-            options: CompressionOptions(
-                format: .recovery, recoveryVolumeSizeBytes: 1_572_864, recoveryPayload: payload))
-        let listing = try await fixture.service.list(archive)
-        let details = try #require(listing.recoveryDetails)
-        #expect(details.volumeLimitBytes == 1_572_864)
-        if index == 0 {
-            #expect(details.requestedMode == 0)
-            #expect(details.requestedValue == 750)
-            #expect(details.payloadBytes == ((details.dataBytes / 65_536 * 750 + 9999) / 10_000) * 65_536)
-        } else {
-            #expect(details.requestedMode == 1)
-            #expect(details.payloadBytes == 524_288)
-        }
-        try await fixture.service.test(archive)
-        let output = fixture.root.appendingPathComponent("output-\(index)")
-        _ = try await fixture.service.extract(archive, to: output)
-        #expect(try Data(contentsOf: output.appendingPathComponent("random.bin")) == data)
-    }
-}
-
-@Test func excessiveRecoveryCapacityHasLocalizedError() async throws {
-    let fixture = try Fixture()
-    defer { fixture.cleanup() }
-    let file = try fixture.file("tiny.txt")
-    do {
-        _ = try await fixture.service.compress(
-            [file], to: fixture.root.appendingPathComponent("failed.rz"),
-            options: CompressionOptions(format: .recovery, recoveryPayload: .bytes(1024 * 1024)))
-        Issue.record("Excessive recovery capacity was accepted")
-    } catch ArchiveError.invalidInput(let message) {
-        #expect(message.contains("最多可设置"))
-    }
 }
 
 @Test func recoveryMemberOpenAndRepairMissingDataAndIndex() async throws {
@@ -144,7 +76,7 @@ import Testing
     let source = try fixture.file("source.txt")
     let archive = fixture.root.appendingPathComponent("archive.rz", isDirectory: true)
     _ = try await fixture.service.compress([source], to: archive, options: CompressionOptions(format: .recovery))
-    for name in ["d000000.rzv", "p000000.rzr"] {
+    for name in ["d000000.rzv", "p000000.rzr", "p000001.rzr"] {
         try FileManager.default.removeItem(at: archive.appendingPathComponent(name))
     }
     do {
@@ -167,8 +99,8 @@ import Testing
     let file = try fixture.file("input/data.txt")
     for options in [
         CompressionOptions(format: .recovery, password: "invalid\npassword"),
-        CompressionOptions(format: .recovery, recoveryVolumeSizeBytes: 0),
-        CompressionOptions(format: .recovery, recoveryVolumeSizeBytes: 16 * 1024 * 1024 * 1024 + 1),
+        CompressionOptions(format: .recovery, recoveryVolumeCounts: .init(data: 0, recovery: 1)),
+        CompressionOptions(format: .recovery, recoveryVolumeCounts: .init(data: 1, recovery: 2)),
     ] {
         await #expect(throws: ArchiveError.self) {
             try await fixture.service.compress(
@@ -225,17 +157,32 @@ import Testing
         try FileManager.default.contentsOfDirectory(atPath: fixture.root.path).allSatisfy { !$0.hasPrefix(".7zip-") })
 }
 
+func recoveryListingJSON(_ overrides: [String: Any] = [:]) throws -> String {
+    let recovery: [String: Any] = [
+        "profile": 5, "dataBytes": 262_144, "payloadBytes": 131_072,
+        "volumeLimitBytes": 0, "dataVolumes": 4, "recoveryVolumes": 2,
+        "requestedMode": 2, "requestedValue": 0, "toleratedVolumeLosses": 2,
+        "volumeSizeBytes": 132_056, "metadataBytesPerVolume": 66_520, "contentLimitBytes": Int64(1) << 40,
+    ]
+    let listing: [String: Any] = [
+        "version": 1, "entries": [], "recovery": recovery, "encrypted": false, "locked": false,
+        "encryptionSuite": 0, "requiresKeyFile": false, "preservesMetadata": false, "directoryUnavailable": false,
+    ]
+    return String(decoding: try JSONSerialization.data(withJSONObject: listing.merging(overrides) { _, new in new }), as: UTF8.self)
+}
+
 @Test func recoveryListingRejectsMalformedContracts() throws {
-    let url = URL(fileURLWithPath: "/archive.rz", isDirectory: true)
-    for json in [
-        #"{"version":2,"entries":[]}"#,
-        #"{"version":1,"entries":[{"path":"../escape","size":1,"isDirectory":false}]}"#,
-        #"{"version":1,"entries":[{"path":"file","size":-1,"isDirectory":false}]}"#,
-        #"{"version":1,"entries":[{"path":"folder","size":1,"isDirectory":true}]}"#,
-        #"{"version":1,"entries":[{"path":"file","size":0,"isDirectory":false},{"path":"file","size":0,"isDirectory":false}]}"#,
-    ] {
-        #expect(throws: ArchiveError.self) { try RecoveryListingParser.parse(json, url: url, physicalSize: 0) }
+    let url = URL(fileURLWithPath: "/archive.rz")
+    let invalid: [[String: Any]] = [
+        ["version": 2], ["recovery": NSNull()],
+        ["entries": [["path": "../escape", "size": 1, "isDirectory": false]]],
+        ["entries": [["path": "file", "size": -1, "isDirectory": false]]],
+        ["entries": [["path": "folder", "size": 1, "isDirectory": true]]],
+        ["entries": Array(repeating: ["path": "file", "size": 0, "isDirectory": false], count: 2)],
+    ]
+    for fields in invalid {
+        #expect(throws: ArchiveError.self) { try RecoveryListingParser.parse(recoveryListingJSON(fields), url: url, physicalSize: 0) }
     }
-    #expect(try RecoveryListingParser.parse(#"{"version":1,"entries":[]}"#, url: url, physicalSize: 0).entries.isEmpty)
+    #expect(try RecoveryListingParser.parse(recoveryListingJSON(), url: url, physicalSize: 0).entries.isEmpty)
     #expect(RecoveryArchive.directory(for: url.appendingPathComponent("p000000.rzr"))?.path == url.path)
 }

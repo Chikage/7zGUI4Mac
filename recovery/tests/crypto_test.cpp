@@ -58,22 +58,7 @@ int main(int argc, char** argv) {
             auto record = keys.seal(uuid, rz::RecordKind::Content, 123, plain.size(), compressed);
             require(nonces.emplace(record.begin(), record.begin() + 24).second, "Nonce repeated");
         }
-        rz::Manifest packed; packed.uuid = uuid; packed.stream_size = 80;
-        rz::SecurityInfo security; security.encrypted = true; security.key_slot = slot;
-        security.index_plain_size = 24; security.index_frames.push_back({0, 80, 24});
-        auto manifest = rz::configure(packed, {}, &security); rz::sign_manifest(manifest, keys);
-        require(rz::authenticate_manifest(manifest, &pass).has_value(), "Public manifest authentication");
-        auto changed = manifest; changed.options.value = 2500;
-        rejects([&] { (void)rz::authenticate_manifest(changed, &pass); });
-        auto encoded = rz::serialize(manifest);
-        require(rz::serialize(rz::parse_configurable_manifest(encoded)) == encoded, "Profile 3 public encoding roundtrip");
-        auto excessive = encoded; excessive[excessive.size() - 128] ^= 255;
-        rejects([&] { (void)rz::parse_configurable_manifest(excessive); });
-        for (size_t i = 0; i < encoded.size(); ++i) {
-            rz::Bytes truncated(encoded.begin(), encoded.begin() + i);
-            rejects([&] { (void)rz::parse_configurable_manifest(truncated); });
-        }
-        std::cout << "Key wrapping, nonce uniqueness, independent AEAD records, AAD binding, manifest authentication and KDF bounds passed\n";
+        std::cout << "Key wrapping, nonce uniqueness, independent AEAD records, AAD binding passed\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

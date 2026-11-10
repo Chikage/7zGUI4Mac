@@ -72,10 +72,10 @@ func encryptedRecoveryCanRepairBeforeUnlocking(encryption: RecoveryEncryption) a
 }
 
 @Test func recoveryListingRejectsUnknownOrContradictoryEncryptionSuites() throws {
-    for json in [
-        #"{"version":1,"encrypted":true,"locked":true,"encryptionSuite":99,"entries":[]}"#,
-        #"{"version":1,"encrypted":false,"encryptionSuite":2,"entries":[]}"#,
-        #"{"version":1,"encrypted":true,"encryptionSuite":0,"entries":[]}"#,
+    for json in try [
+        recoveryListingJSON(["encrypted": true, "locked": true, "encryptionSuite": 99]),
+        recoveryListingJSON(["encryptionSuite": 2]),
+        recoveryListingJSON(["encrypted": true, "encryptionSuite": 0]),
     ] {
         #expect(throws: ArchiveError.self) {
             try RecoveryListingParser.parse(json, url: URL(fileURLWithPath: "/invalid.rz"), physicalSize: 0)
@@ -139,11 +139,11 @@ func encryptedRecoveryCanRepairBeforeUnlocking(encryption: RecoveryEncryption) a
 
 @Test func protectedListingRetainsEncryptionForEmptyArchives() throws {
     let url = URL(fileURLWithPath: "/empty.rz", isDirectory: true)
-    let json = #"{"version":1,"encrypted":true,"locked":true,"preservesMetadata":true,"entries":[]}"#
+    let json = try recoveryListingJSON(["encrypted": true, "locked": true, "encryptionSuite": 1, "preservesMetadata": true])
     let listing = try RecoveryListingParser.parse(json, url: url, physicalSize: 0)
     #expect(listing.isEncrypted && listing.isLocked && listing.preservesMetadata)
     #expect(throws: ArchiveError.self) {
         try RecoveryListingParser.parse(
-            #"{"version":1,"encrypted":false,"locked":true,"entries":[]}"#, url: url, physicalSize: 0)
+            recoveryListingJSON(["locked": true]), url: url, physicalSize: 0)
     }
 }

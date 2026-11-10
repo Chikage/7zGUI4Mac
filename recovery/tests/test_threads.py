@@ -35,13 +35,13 @@ def contents(root):
 
 def stored_stream(archive):
     manifest = (archive / 'manifest.rzm').read_bytes()
-    size, blocks = struct.unpack_from('<QQ', manifest, 60)
+    size, stripes = struct.unpack_from('<QQ', manifest, 44)
     volumes = [p.read_bytes() for p in sorted(archive.glob('d*.rzv'))]
     output = bytearray()
-    for block in range(blocks):
+    for block in range(stripes * len(volumes)):
         volume = volumes[block % len(volumes)]
         index_size = struct.unpack_from('<Q', volume, 40)[0]
-        offset = 120 + index_size + (block // len(volumes)) * 65536
+        offset = 120 + index_size + (block // len(volumes)) * 65568
         output.extend(volume[offset:offset + 65536])
     return bytes(output[:size])
 
@@ -69,7 +69,7 @@ class ThreadsTest(unittest.TestCase):
         self.assertFalse(list(self.work.glob('.rz-stage-*')))
 
     def test_roundtrip_and_serial_stream_identity(self):
-        modes = [('profile2', ['--profile', '2'], None), ('plain3', ['--no-metadata'], None),
+        modes = [('plain', ['--no-metadata'], None),
                  ('standard', ['--encrypt', '--password-stdin'], PASSWORD)]
         if self.aes: modes.append(('dual', ['--encrypt', '--password-stdin', '--encryption', 'dual'], PASSWORD))
         for name, options, password in modes:
@@ -79,7 +79,7 @@ class ThreadsTest(unittest.TestCase):
                     archive = self.work / f'{name}-{count}.rz'
                     # Exercise the GUI's create-selected path too.
                     result = run('create-selected', archive, '--threads', count, '--progress',
-                                 '--volume-size', '1MiB', *options, '--', *sorted(self.source.iterdir()), password=password)
+                                 *options, '--', *sorted(self.source.iterdir()), password=password)
                     stats = [line.split('\t') for line in result.stderr.splitlines() if line.startswith('RZPROGRESS1\t')]
                     self.assertTrue(stats)
                     self.assertTrue(all(len(row) == 8 for row in stats))
@@ -95,18 +95,6 @@ class ThreadsTest(unittest.TestCase):
                     self.assertTrue((output / 'empty-directory').is_dir())
                     if password is None: streams.append(stored_stream(archive))
             if streams: self.assertEqual(*streams)
-
-    def test_legacy_and_empty_auto(self):
-        source = self.work / 'tiny'; source.mkdir()
-        for profile in (1, 2, 3):
-            archive = self.work / f'empty-{profile}'
-            run('create', source, archive, '--profile', profile, '--threads', 'auto')
-            run('verify', archive)
-        (source / 'file').write_bytes(b'legacy parallel' * 100)
-        archive = self.work / 'legacy'
-        run('create', source, archive, '--profile', 1, '--threads', 4)
-        output = self.work / 'legacy-out'; run('extract', archive, output)
-        self.assertEqual(contents(source), contents(output))
 
     def test_invalid_thread_options(self):
         for value in ('0', '-1', '65', '1.0', 'fast', '', '9999999999999999999999999'):

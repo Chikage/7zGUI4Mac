@@ -1,5 +1,4 @@
 #include "io.hpp"
-#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -168,14 +167,6 @@ void Staging::commit_with_key(const fs::path& key_file) {
         if (!committed_ && ::lstat(destination.c_str(), &current) == 0 && current.st_dev == original.st_dev && current.st_ino == original.st_ino)
             (void)::unlink(destination.c_str());
         throw;
-    }
-}
-void copy_file_contents(const File& source, File& dest, uint64_t size) {
-    Bytes block(BlockSize);
-    for (uint64_t offset = 0; offset < size;) {
-        auto n = static_cast<size_t>(std::min<uint64_t>(block.size(), size - offset));
-        if (!source.read(offset, block.data(), n)) throw std::runtime_error("Truncated source during copy");
-        dest.append(block.data(), n); offset += n;
     }
 }
 }

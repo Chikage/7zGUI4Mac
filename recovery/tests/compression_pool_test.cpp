@@ -73,8 +73,11 @@ void packing() {
     auto plan = rz::directory_inputs(source, root / "unused-output");
     for (uint32_t count : {1U, 4U, 0U}) {
         auto spool_path = root / ("spool-" + std::to_string(count));
-        rz::Manifest manifest;
-        rz::pack(source, plan.paths, spool_path, manifest, nullptr, count);
+        rz::PackedContents manifest;
+        {
+            rz::File output(spool_path, rz::File::Mode::New);
+            rz::pack_contents(source, plan.paths, output, manifest, {}, 0, nullptr, count);
+        }
         rz::File spool(spool_path); uint64_t expected_offset = 0;
         require(manifest.entries.size() == plan.paths.size(), "all entries preserved");
         for (const auto& entry : manifest.entries) {
@@ -97,7 +100,7 @@ void packing() {
     }
     bool failed = false;
     try {
-        rz::File spool(root / "encoder-failure", rz::File::Mode::New); rz::Manifest manifest; size_t frames = 0;
+        rz::File spool(root / "encoder-failure", rz::File::Mode::New); rz::PackedContents manifest; size_t frames = 0;
         rz::pack_contents(source, plan.paths, spool, manifest,
             [&](const rz::Bytes& compressed, uint64_t, uint32_t) {
                 if (++frames == 2) throw std::runtime_error("injected encoder failure");

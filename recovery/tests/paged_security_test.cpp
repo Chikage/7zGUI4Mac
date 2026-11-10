@@ -41,7 +41,7 @@ rz::PagedBootstrap read_bootstrap(const rz::fs::path& directory) {
 }
 rz::fs::path volume_path(const rz::fs::path& directory, const rz::PagedBootstrap& b, uint32_t column) {
     const auto k = b.manifest.options.data_volumes;
-    return directory / rz::configurable_volume_name(column >= k, column >= k ? column - k : column);
+    return directory / rz::volume_name(column >= k, column >= k ? column - k : column);
 }
 uint64_t index_offset(const rz::PagedBootstrap& b, uint32_t stripe) {
     require(stripe < b.layout.index_stripes, "invalid test index stripe");
@@ -73,6 +73,31 @@ void check_extraction(const rz::fs::path& archive, const rz::fs::path& output, c
     require(read_file(output / "content") == expected, "repaired encrypted content differs");
     require(read_file(output / "empty").empty(), "empty source file changed");
 }
+void check_foreign_envelopes(const rz::fs::path& original, const rz::fs::path& mixed, const rz::PagedBootstrap& bootstrap) {
+    rz::fs::copy(original, mixed, rz::fs::copy_options::recursive);
+    const auto sidecar = mixed / "manifest.rzm";
+    rz::Bytes marker{'R','Z','I','D','X','0','0','0'};
+    for (uint8_t version = '1'; version <= '4'; ++version) {
+        marker.back() = version;
+        rz::File file(sidecar, rz::File::Mode::Update);
+        const auto checksum = rz::hash(marker);
+        file.resize(0); file.append(marker); file.append(checksum.data(), checksum.size());
+        rejects([&] { (void)rz::list_paged_archive(mixed); }, "foreign sidecar accepted alongside profile 5 volumes");
+    }
+    rz::fs::remove(sidecar);
+    rz::File file(mixed / "d000000.rzv", rz::File::Mode::Update);
+    for (bool footer : {false, true}) {
+        const auto valid = rz::make_paged_header(bootstrap, false, 0, footer);
+        const auto offset = footer ? file.size() - valid.size() : 0;
+        auto foreign = valid; foreign[7] = '4'; foreign[8] = 4;
+        file.write(offset, foreign);
+        require(rz::verify_paged_archive(mixed).exit_code() == 2, "damaged magic prevented profile 5 metadata fallback");
+        const auto checksum = rz::hash(foreign.data(), foreign.size() - 32);
+        file.write(offset + foreign.size() - checksum.size(), checksum.data(), checksum.size());
+        rejects([&] { (void)rz::verify_paged_archive(mixed); }, "valid foreign volume header accepted");
+        file.write(offset, valid);
+    }
+}
 void suite(const rz::fs::path& root, uint32_t crypto) {
     rz::fs::create_directory(root); const auto source = root / "source"; rz::fs::create_directory(source);
     rz::Bytes content(300000); std::mt19937 random(73); for (auto& byte : content) byte = static_cast<uint8_t>(random());
@@ -83,11 +108,11 @@ void suite(const rz::fs::path& root, uint32_t crypto) {
     const auto* credential = crypto ? &password : nullptr;
     rz::SecurityOptions security; security.metadata = false; security.encrypt = crypto != 0;
     security.crypto_suite = crypto ? crypto : rz::CryptoProfile; security.password = credential;
-    rz::RecoveryOptions options; options.profile = 5; options.mode = rz::RecoveryMode::Volumes;
-    options.volume_size = 0; options.value = 0; options.data_volumes = 2; options.recovery_volumes = 2;
+    rz::RecoveryOptions options{2, 2};
     const auto original = root / "original";
     rz::create_paged_archive(rz::directory_inputs(source, original), original, options, security, false, 2);
     const auto pristine = snapshot(original); const auto b = read_bootstrap(original);
+    if (!crypto) check_foreign_envelopes(original, root / "foreign", b);
     require(b.layout.hash_pages == 1 && b.layout.index_stripes == 1, "unexpected leaf/root fixture layout");
     require(rz::verify_paged_archive(original, credential).exit_code() == 0, "pristine archive failed full verification");
 

@@ -121,10 +121,8 @@ void write_key_file(const fs::path& path, const UUID& uuid, const Password& key)
     auto checksum = key_file_checksum(w.b.data(), w.b.size()); w.raw(checksum.data(), 32);
     File file(path, File::Mode::New); file.append(w.b); file.sync();
 }
-ArchiveKeys::ArchiveKeys(const unsigned char* master, uint32_t suite, bool writable, uint64_t max_output)
-    : suite_(suite), writable_(writable), max_record_offset_(max_output) {
-    if (max_output > UINT64_MAX - max_output / 100) throw std::runtime_error("Invalid encrypted stream limit");
-    max_record_offset_ += max_output / 100;
+ArchiveKeys::ArchiveKeys(const unsigned char* master, uint32_t suite, bool writable)
+    : suite_(suite), writable_(writable) {
     validate_crypto_suite(suite);
     for (uint64_t id = 1; id <= 4; ++id)
         if (crypto_kdf_blake2b_derive_from_key(keys_.data() + (id - 1) * 32, 32, id,
@@ -141,7 +139,7 @@ ArchiveKeys::ArchiveKeys(const unsigned char* master, uint32_t suite, bool writa
             throw std::runtime_error("Archive manifest key derivation failed");
     }
 }
-ArchiveKeys create_keys(const UUID& uuid, const Password& password, KeySlot& slot, uint64_t max_output) {
+ArchiveKeys create_keys(const UUID& uuid, const Password& password, KeySlot& slot) {
     validate_crypto_suite(slot.suite); bool dual = slot.suite == DualCryptoProfile;
     if (dual) require_aes();
     initialize(); randombytes_buf(slot.salt.data(), slot.salt.size()); randombytes_buf(slot.nonce.data(), slot.nonce.size());
@@ -162,7 +160,7 @@ ArchiveKeys create_keys(const UUID& uuid, const Password& password, KeySlot& slo
             outer_aad.data(), outer_aad.size(), nullptr, slot.aes_nonce.data(), outer_key.data()) != 0 || size != slot.wrapped_key.size())
             throw std::runtime_error("Key wrapping failed");
     } else slot.wrapped_key = std::move(wrapped);
-    return ArchiveKeys(master.data(), slot.suite, true, max_output);
+    return ArchiveKeys(master.data(), slot.suite);
 }
 ArchiveKeys unlock_keys(const UUID& uuid, const Password& password, const KeySlot& slot) {
     validate_crypto_suite(slot.suite); bool dual = slot.suite == DualCryptoProfile;
@@ -190,7 +188,7 @@ Bytes ArchiveKeys::seal(const UUID& uuid, RecordKind kind, uint64_t offset, uint
     auto id = static_cast<uint32_t>(kind); bool dual = suite_ == DualCryptoProfile;
     if (!writable_ || id < 1 || id > 3 || plain_size > FrameSize || compressed.size() > FrameSize + FrameSize / 100 - 68)
         throw std::runtime_error("Invalid encrypted record input");
-    if (dual && (offset < next_offset_ || offset > max_record_offset_ || offset > UINT64_MAX - compressed.size() - 68))
+    if (dual && (offset < next_offset_ || offset > MaxStream || offset > UINT64_MAX - compressed.size() - 68))
         throw std::runtime_error("Encrypted record positions must advance; refusing nonce reuse");
     Bytes out(compressed.size() + RecordOverhead); randombytes_buf(out.data(), 24);
     auto aad = record_aad(uuid, kind, offset, plain_size, suite_, 1); unsigned long long size = 0;

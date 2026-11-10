@@ -25,15 +25,11 @@ void add_tree(const fs::path& root, const fs::path& source, InputPaths& paths) {
         add_input(root, e.path(), paths);
     }
 }
-void pack(const fs::path& source, const InputPaths& paths, const fs::path& spool_path, Manifest& m, CompressionProgress* progress, uint32_t threads) {
-    File spool(spool_path, File::Mode::New);
-    pack_contents(source, paths, spool, m, {}, 0, progress, threads);
-}
-void pack_contents(const fs::path& source, const InputPaths& paths, File& spool, Manifest& m,
-                   const FrameEncoder& encoder, uint64_t reserved_plain_bytes, CompressionProgress* progress, uint32_t threads, uint64_t max_output) {
+void pack_contents(const fs::path& source, const InputPaths& paths, File& spool, PackedContents& m,
+                   const FrameEncoder& encoder, uint64_t reserved_plain_bytes, CompressionProgress* progress, uint32_t threads) {
     if (progress) progress->start();
     uint64_t raw_total = reserved_plain_bytes, metadata_budget = 60;
-    if ((max_output != MaxOutput && max_output != MaxPagedOutput) || raw_total > max_output)
+    if (raw_total > MaxOutput)
         throw std::runtime_error("Metadata exceeds archive size limit");
     CompressionPool pool(threads);
     auto commit_next = [&] {
@@ -56,7 +52,7 @@ void pack_contents(const fs::path& source, const InputPaths& paths, File& spool,
         blake3_hasher digest; blake3_hasher_init(&digest);
         if (!e.directory) {
             File file(source / e.path); e.size = file.size();
-            if (e.size > max_output - raw_total) throw std::runtime_error("Input exceeds profile content limit");
+            if (e.size > MaxOutput - raw_total) throw std::runtime_error("Input exceeds profile content limit");
             raw_total += e.size;
             for (uint64_t offset = 0; offset < e.size;) {
                 // Drain BEFORE allocating: the bound covers every outstanding frame.

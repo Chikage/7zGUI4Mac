@@ -1,71 +1,22 @@
-# RZ 算法、磁盘格式与兼容性维护规范
+# RZ 第 5 版算法与磁盘格式
 
-本文记录 **2026-09-27 工作区实现**的 RZ 格式，供实现读取器、定位损坏、优化性能及后续版本迭代参考。最新容器为 **profile 5**。本文完整定义其分页摘要索引、受恢复码保护的索引区、冗余启动元数据及 1 TiB 内容上限，并保留 profile 1–4 的字节布局与兼容性约束。Profile 5 的磁盘定义从 [第 6.6 节](#66-profile-5-几何与物理布局) 开始，专项说明另见 [FORMAT-V5.md](FORMAT-V5.md)。
+## 1. 版本与实现
 
-本文不是某个上游 `.rz` 格式的说明：本项目 RZ 是自定义可恢复归档，不能当作 RAR、7z、PAR2 或其他同扩展名格式读取。当前仍标记为实验格式。
+当前 CLI 与 macOS 应用只支持容器 profile 5。创建归档默认使用 10 个数据卷和 2 个恢复卷。命令行的 `--profile 5` 可省略。卷头、卷尾和启动元数据分别使用 `RZVOL005`、`RZEND005`、`RZIDX005`。
 
-**维护约定：已有编号对应的字节语义必须保留。新读取器继续读取已有合法归档；新功能不得在原编号下悄悄改写算法。** 第 12–13 节是后续变更的审查及验证要求；文档本身不会自动阻止不兼容代码合入，现有测试与尚待补齐的保障在第 13 节分别列明。
+容器版本、加密套件和前端协议独立编号。第 5 版使用 `RZPRI003` 私有索引、`RZMET001` 属性记录、`RZKEY001` 独立密钥文件、加密套件 1 或 2，以及版本 1 的 JSON 列表。对应标识和算法域均属于第 5 版的字节格式。
 
-## 目录
-
-1. [版本与实现基线](#1-版本与实现基线)
-2. [术语、编码约定与处理流水线](#2-术语编码约定与处理流水线)
-3. [输入规划与压缩算法](#3-输入规划与压缩算法)
-4. [校验、纠删码及恢复保证](#4-校验纠删码及恢复保证)
-5. [加密、密钥派生与密钥文件](#5-加密密钥派生与密钥文件)
-6. [profile 4 与 profile 5 分卷和索引](#6-profile-4-与-profile-5-分卷和索引)（[Profile 5 入口](#66-profile-5-几何与物理布局)）
-7. [私有索引、条目与文件属性](#7-私有索引条目与文件属性)
-8. [读取、验证、修复和解压](#8-读取验证修复和解压)
-9. [版本差异与旧版兼容规则](#9-版本差异与旧版兼容规则)
-10. [并行处理、资源限制与发布](#10-并行处理资源限制与发布)
-11. [CLI 与前端协议](#11-cli-与前端协议)
-12. [版本迭代规则](#12-版本迭代规则)
-13. [兼容性验证与发布检查表](#13-兼容性验证与发布检查表)
-14. [实现导航与文档维护](#14-实现导航与文档维护)
-
-## 1. 版本与实现基线
-
-### 1.1 不同层的版本必须分开理解
-
-| 层 | 当前值 | 作用 |
-|---|---|---|
-| CLI 展示版本 | `rz 0.7.0`，见 `main.cpp::usage` | 程序发布标识，不参与文件解析 |
-| CMake 工程版本 | `0.7.0` | 与 CLI 同步；不能单凭程序版本判断归档格式 |
-| 容器 / 编码 profile | 最新 `5`，支持 `1/2/3/4/5` | 决定公开索引、卷头、编码几何与映射 |
-| 加密套件 `crypto_suite` | `1` 或 `2` | 仅加密归档存储此字段；JSON 的 `0` 表示未加密 |
-| 私有索引 | `RZPRI003` | profile 3、4、5 共用；profile 升级不意味着所有 magic 同步升级 |
-| 属性记录 | `RZMET001` | 与容器版本独立 |
-| 外置密钥文件 | `RZKEY001` | 与加密套件独立 |
-| JSON / 能力查询 / 统计 | `version=1` | 与磁盘 profile 无关 |
-| 进度与统计前缀 | `RZPROGRESS1`、`RZTIMING1` | stderr 中供 GUI 解析的独立协议 |
-
-基线来自当前源文件，包含尚未提交的工作区代码；不能仅凭仓库已有 Git HEAD 重建此基线。归档版本必须由 magic、profile 和功能字段共同识别，不能依据扩展名、GUI 版本或 CMake 版本猜测。
-
-### 1.2 当前创建默认值
-
-| 创建方式 | 容器与保护策略 |
-|---|---|
-| CLI 不带卷数参数、不显式指定 profile | profile 3；64 MiB 卷大小上限；20% 恢复载荷；保存属性；默认不加密 |
-| CLI `--profile 4` | profile 4；默认 `K=10, M=2`；保存属性；默认不加密 |
-| CLI 同时指定 K/M，未显式指定 profile | 选择 profile 4；与 `--profile 5` 同用时选择 profile 5 |
-| CLI 密码加密，未指定套件 | suite 1，`standard` |
-| CLI `--generate-key-file`，未指定套件 | suite 2，`dual` |
-| CLI `--profile 5` | profile 5；默认 10+2；分页索引；内容上限 1 TiB |
-| macOS GUI 新建 RZ | 显式传入 profile 5 和 K/M，默认 10+2；默认自动生成密钥文件及双层加密，可改选 |
-
-“最新支持 profile 5”不等于“无参数 CLI 默认写 profile 5”。保留 CLI 的 profile 3 默认是已有脚本的兼容契约。
-
-### 1.3 固定依赖
+### 固定依赖
 
 | 组件 | 基线版本 / revision | 用途 |
 |---|---|---|
 | Zstd | 1.5.7 | 独立帧压缩 |
 | BLAKE3 | 1.8.2 | 内容、存储块与结构摘要；加密索引 MAC |
 | libsodium | 1.0.22 | Argon2id、BLAKE2b KDF、XChaCha20-Poly1305、AES-GCM、随机数和秘密内存 |
-| Jerasure | `de1739cc8483696506829b52e7fda4f6bb195e6a` | 串行恢复、profile 1 编码 |
+| Jerasure | `de1739cc8483696506829b52e7fda4f6bb195e6a` | 条带擦除恢复 |
 | GF-Complete | `a6862d10c9db467148f20eef2c6445ac9afd94d8` | GF(256) 运算及独立并行编码上下文 |
 
-源码归档及 SHA-256 见 [依赖来源](../vendor/PROVENANCE.md)；CMake 从本地归档构建。Zstd 内部多线程关闭，多核压缩由本项目按独立帧调度。更换依赖版本不能自动视为格式兼容，仍须执行第 13 节的互操作验证。
+源码归档及 SHA-256 见 [依赖来源](../vendor/PROVENANCE.md)；CMake 从本地归档构建。Zstd 内部多线程关闭，多核压缩由本项目按独立帧调度。更换依赖版本不能自动视为格式兼容，应使用固定的第 5 版样本验证读写互操作性。
 
 ## 2. 术语、编码约定与处理流水线
 
@@ -89,26 +40,7 @@
 
 记录可以跨块、跨卷、跨条带。读取记录必须先恢复逻辑流顺序，不能直接对一个物理数据卷运行 Zstd 解压。
 
-### 2.3 profile 3/4 的创建顺序
-
-```text
-扫描输入、相对路径排序
-  ├─ 按条目顺序捕获属性 → 属性序列化 → 切帧 → Zstd → 可选 AEAD
-  ├─ 按条目顺序读取文件 → 内容切帧   → Zstd → 可选 AEAD
-  └─ 序列化私有索引               → 切帧 → Zstd → 可选 AEAD
-                  ↓ 顺序连接
-逻辑存储流 S = [全部属性记录][全部内容记录][私有索引记录]
-                  ↓ 切成 64 KiB 数据块，尾部补零
-按条带生成 RS 恢复块 → 计算存储摘要 → 按序直接写最终暂存卷载荷
-                  ↓
-生成公开索引 → 加密时计算公开索引 MAC → 普通 BLAKE3 摘要
-                  ↓
-回填卷首尾索引和头尾 → 写 sidecar → 完整复验 → 发布
-```
-
-RS 作用于**最终存储字节**：加密时包括密文、nonce 和认证标签。填充零在记录加密之后添加。profile 3/4 的公开索引和卷头尾不进入 RS；私有索引和属性记录进入 RS。
-
-### 2.4 profile 5 的创建顺序
+### 2.3 profile 5 的创建顺序
 
 ```text
 属性记录 + 内容记录 + 私有目录记录 → 压缩/可选加密逻辑流
@@ -188,7 +120,7 @@ plain:u32        # 解压后的原始长度
 | profile 5 索引卷整体 | 同一卷索引区全部 `payload || local_digest` 的连续 BLAKE3 |
 | 加密公开索引 / bootstrap MAC | keyed BLAKE3，见第 5 节；与普通摘要不能混用 |
 
-profile 2/3/4 的存储块，以及 profile 5 **内容区**的数据块和恢复块，摘要固定为：
+内容区的数据块和恢复块使用同一摘要公式。
 
 ```text
 BLAKE3(
@@ -198,11 +130,11 @@ BLAKE3(
 )
 ```
 
-profile 4 和 profile 5 内容区中，`group_id` 就是从 0 起的条带号 `t`，数据 `shard_id=0..K-1`，恢复 `shard_id=K..K+M-1`。这里**没有额外 stripe_id**，也不能另改域名。profile 5 索引区使用独立的 `rz5-index-block` 域，定义见第 6.8 节。
+内容区中，`group_id` 就是从 0 起的条带号 `t`，数据 `shard_id=0..K-1`，恢复 `shard_id=K..K+M-1`。这里**没有额外 stripe_id**，也不能另改域名。profile 5 索引区使用独立的 `rz5-index-block` 域，定义见第 6.3 节。
 
 普通 BLAKE3 用于发现损坏及定位擦除，不能证明来源真实性。攻击者能重新计算未加密归档的摘要。加密归档通过密钥包装、公开索引 MAC 和记录 AEAD 获得认证；无凭据修复只能提供存储一致性。
 
-### 4.2 profile 4/5 的系统 Cauchy Reed–Solomon
+### 4.2 系统 Cauchy Reed–Solomon
 
 固定域为 `GF(2^8)`，不可约多项式为：
 
@@ -223,7 +155,7 @@ P[t,r][j] = XOR(c=0..K-1,
          j = 0..65535
 ```
 
-数据列域元素 `0..99` 与恢复行域元素 `128..227` 在当前允许范围内不相交，分母非零。底层编码器可构造更多行，但容器当前仍强制 `M<=K<=100`。增减 M 不改变已有恢复行的系数；不能把恢复行重排成其他“等价 RS”矩阵。
+数据列域元素 `0..99` 与恢复行域元素 `128..227` 在当前允许范围内不相交，分母非零。增减 M 不改变已有恢复行的系数；不能把恢复行重排成其他“等价 RS”矩阵。
 
 恢复时从存活 shard 对应的生成矩阵行中取 K 行，求逆并恢复数据，进而重建恢复块。实际由 Jerasure 擦除解码完成。`jerasure_matrix_decode` 的 `row_k_ones` 必须为 **0**：此 Cauchy 矩阵首个恢复行并非全 1，不能使用该快捷假设。
 
@@ -238,9 +170,7 @@ P[t,r][j] = XOR(c=0..K-1,
 
 系统先哈希判坏，再把已知位置传给 erasure 解码器；不进行未知错误位置的盲纠错，也不尝试滚动重同步插入 / 删除的字节。
 
-profile 4 每卷每条带恰好一个块，因此**任意 M 个整卷丢失可恢复**，条件是其余卷完整且至少一份公开索引仍可定位、可校验。额外局部损坏与缺卷共同消耗同一条带的 M 额度，不能借用其他条带的剩余额度。
-
-profile 5 在内容区与索引区分别应用相同 K+M 几何；任意 M 整卷丢失的保证要求剩余卷完整且至少一份 bootstrap 可定位、可校验。索引区先恢复，再恢复内容区，具体认证与擦除判断见第 6.9–6.10 节。
+profile 5 在内容区与索引区分别应用相同 K+M 几何；任意 M 整卷丢失的保证要求剩余卷完整且至少一份 bootstrap 可定位、可校验。索引区先恢复，再恢复内容区，具体认证与擦除判断见第 6.4–6.5 节。
 
 例如 10+2 缺少两个数据卷后，第三卷任一条带再坏一块，就有该条带三块不可用；“20% 恢复载荷”不能保证恢复这种损坏。仅缺恢复卷且所有数据块完整时，可以直接解压；完整修复仍按上述总擦除数判断。
 
@@ -368,25 +298,15 @@ AAD_layer = ASCII("rz3-record") || UUID[16] || LE32(kind)
 
 创建和解锁 suite 2 要求 libsodium AES-GCM 硬件能力检测通过；不支持时拒绝，不能降级成 suite 1。读取公开摘要、存储校验和密文修复不要求 AES 或凭据。双层不增加弱密码的熵，也不能替代密钥备份；此自定义组合尚无独立密码协议审计。
 
-### 5.5 公开索引认证的精确顺序
+### 5.5 启动元数据认证
 
-profile 3/4 的规范化输入为完整公开索引：
+使用 keyed BLAKE3，以公开索引 MAC 密钥对固定域和整个 bootstrap 认证。计算时将 public_mac 的 32 字节置零。
 
 ```text
-canonical = serialize(public_manifest with public_mac = 32 zero bytes)
-public_mac = keyed_BLAKE3(mac_key,
-                         ASCII("rz3-public-index") || canonical)
-final_manifest = serialize(public_manifest with public_mac filled)
-manifest_digest = BLAKE3(final_manifest)
+public_mac = keyed_BLAKE3(mac_key, ASCII("rz3-public-index") || bootstrap_with_zero_mac)
 ```
 
-profile 3/4 的 MAC 直接覆盖几何、全部块摘要、私有索引位置、功能标志及密钥槽。
-
-profile 5 保留相同的 MAC 算法、密钥派生和 `rz3-public-index` 域，但规范化输入改为第 6.7 节的**整个 bootstrap**，仅将其中 `public_mac[32]` 置零。输入包含根表摘要及末尾所有索引卷整体摘要；内容块摘要通过根表和叶页间接绑定。必须使用 `serialize_bootstrap`，不能用旧公开索引的序列化器代替。
-
-读取时解开主密钥后先重算并常量时间比较对应版本的 MAC，通过后才加载私有索引。profile 5 复用既有 suite 1/2 的记录 AAD、nonce、密钥包装和 KDF 参数；只在明确的 profile 5 创建路径放宽记录偏移上限至 `1 TiB+floor(1 TiB/100)`，旧路径保持 64 GiB 基准。
-
-规范化由当前 profile 的固定字段序列定义，不存在任意顺序字段或可忽略扩展字节。序列化顺序、字段宽度、默认值或尾随数据处理的改变，都会影响认证。
+读取时先验证 MAC，再加载私有索引。根表摘要和所有索引卷摘要均在认证范围内。
 
 ### 5.6 外置 `.rzkey` 格式及发现
 
@@ -407,164 +327,11 @@ profile 5 保留相同的 MAC 算法、密钥派生和 `rz3-public-index` 域，
 
 密钥文件不进入 K+M 卷集，也不受 RS 保护；`repair` 不复制或生成密钥。归档和密钥一起泄露即可解密，全部恢复卷完好也不能弥补密钥丢失。
 
-## 6. profile 4 与 profile 5 分卷和索引
+## 6. 分卷与分页索引
 
-第 6.1–6.5 节保留 profile 4 的完整公开索引格式，第 6.6–6.11 节定义 profile 5 的分页格式。两者共享第 4 节的 RS 数学定义；各节局部符号不能跨格式套用。
+### 6.1 profile 5 几何与物理布局
 
-### 6.1 逻辑块、条带与物理位置
-
-令 `B=65,536`，`S` 为全部记录连接后的实际字节数，含属性、内容、私有索引和加密开销，不含公开索引：
-
-```text
-T = max(1, ceil(S / (K*B)))
-data_blocks = T*K
-recovery_blocks = T*M
-blocks_per_volume = T
-P = T*B                                  # 每卷载荷字节数
-```
-
-逻辑数据流末尾补零至 `T*K*B`。`D[t,c]` 对应逻辑流的 `[(t*K+c)*B, (t*K+c+1)*B)`；超过 S 的字节为零。恢复块 `P[t,r]` 按第 4 节计算。
-
-设公开索引长度为 L：
-
-```text
-全局数据块 b：  volume_id=b%K，slot=floor(b/K)
-全局恢复块 q：  volume_id=q%M，slot=floor(q/M)
-块的物理偏移：  120 + L + slot*B
-```
-
-数据卷为 `d000000.rzv` 至 `d(K-1).rzv`，恢复卷为 `p000000.rzr` 至 `p(M-1).rzr`，编号十进制、至少六位补零。所有卷中的第 t 个槽组成同一条带。
-
-```text
-               d000000    d000001    ... d(K-1)     p000000 ... p(M-1)
-slot 0         D[0,0]     D[0,1]        D[0,K-1]    P[0,0]     P[0,M-1]
-slot 1         D[1,0]     D[1,1]        D[1,K-1]    P[1,0]     P[1,M-1]
-...
-slot T-1       D[T-1,0]   D[T-1,1]      D[T-1,K-1]  P[T-1,0]   P[T-1,M-1]
-```
-
-### 6.2 卷封装
-
-```text
-Header[120] | PublicManifest[L] | Payload[P] | PublicManifest[L] | Footer[120]
-```
-
-头和尾的字段相同，magic 不同：
-
-| 偏移 | 类型 / 长度 | profile 4 字段 |
-|---:|---|---|
-| 0 | 8 bytes | 头 `RZVOL004` / 尾 `RZEND004` |
-| 8 | u32 | 4 |
-| 12 | u32 | 0=数据卷，1=恢复卷 |
-| 16 | 16 bytes | UUID |
-| 32 | u32 | 同类型物理卷编号，从 0 开始 |
-| 36 | u32 | 保留，必须为 0 |
-| 40 | u64 | L，公开索引字节数 |
-| 48 | u64 | P，该卷载荷字节数 |
-| 56 | 32 bytes | BLAKE3(完整公开索引) |
-| 88 | 32 bytes | BLAKE3(本头 / 尾前 88 字节) |
-
-第二份索引起点为 `120+L+P`，Footer 起点为 `120+2L+P`。每个数据卷和恢复卷大小严格相同：
-
-```text
-V = 240 + 2*L + T*65536
-```
-
-`manifest.rzm` 为 `PublicManifest[L] || BLAKE3(PublicManifest)[32]`，大小 L+32。sidecar 与可选 `.rzkey` 不计入 K+M；`.rz` 在当前 CLI 中是包含卷集的**目录**，并不是把所有卷连接起来的单个文件。
-
-### 6.3 公开索引固定前缀
-
-| 偏移 | 类型 / 长度 | 值 |
-|---:|---|---|
-| 0 | 8 bytes | `RZIDX004` |
-| 8 | 16 bytes | UUID |
-| 24 | u32 | profile=4 |
-| 28 | u32 | block_size=65536 |
-| 32 | u32 | frame_size=4194304 |
-| 36 | u32 | requested_mode=2，按卷数 |
-| 40 | u64 | requested_value=0 |
-| 48 | u64 | volume_size_limit=0，表示不设旧版卷大小上限 |
-| 56 | u32 | K，数据卷数 |
-| 60 | u32 | M，恢复卷数 |
-| 64 | u32 | blocks_per_volume=T |
-| 68 | u64 | stream_size=S |
-| 76 | u64 | data_blocks=T*K |
-| 84 | u64 | recovery_blocks=T*M |
-| 92 | u32 | group_count=T |
-| 96 | 变长 | 条带组表 |
-
-组表按 t 递增，每组：
-
-```text
-k:u32 = K
-m:u32 = M
-hashes[K+M][32]            # 先 K 个数据列，再 M 个恢复行
-```
-
-读取器重新从 S/K/M 推导 T、块数及卷大小，逐组检查 k/m 一致，拒绝任何互相矛盾的冗余字段，不能选择其中一个值“尽量读取”。
-
-### 6.4 安全尾部与私有索引映射
-
-组表之后从 `96 + T*(8+32*(K+M))` 开始：
-
-```text
-security_flags:u32
-private_index_original_size:u64
-private_index_frame_count:u32 = n
-repeat n:
-    offset:u64
-    stored:u32
-    plain:u32
-
-if security_flags & 1:
-    crypto_suite:u32                      # 1 或 2
-    password_opslimit:u64                 # 密码=3；密钥文件=0
-    password_memlimit:u64                 # 密码=67108864；密钥文件=0
-    salt[16]
-    wrap_nonce[24]
-    if crypto_suite == 2:
-        aes_wrap_nonce[12]
-        wrapped_master_keys[96]
-    else:
-        wrapped_master_key[48]
-    public_mac[32]
-```
-
-`security_flags` 位语义：bit0（1）加密；bit1（2）保存属性；bit2（4）独立密钥文件。其他位当前必须为零；bit2 设置时必须同时设置 bit0。关闭加密时不写 crypto_suite、成本、盐、包装或 MAC 字段。
-
-私有索引原始长度在 `1..16 MiB`，`n=ceil(original_size/F)`，所以 n 为 1–4。帧位置连续，最后一帧末尾必须等于 S，非末帧 plain=F，plain 总和等于声明的私有索引原始长度。整个公开索引不得有尾随字节。
-
-由字段可直接推导其精确长度：
-
-```text
-E = 0（不加密），140（suite 1），200（suite 2）
-L = 96 + T*(8 + 32*(K+M)) + 16 + 16*n + E
-```
-
-E 只指 `if encrypted` 中的密钥槽尾部，不含其前面的 flags、长度和映射。当前 profile 4 没有公开文件条目，L 与文件数的关系通过私有索引及流大小间接体现。
-
-### 6.5 空间例子与容量边界
-
-假设 S=700,000 字节、K=4、M=2、未加密且私有索引只有一帧：
-
-```text
-T = ceil(700000 / 262144) = 3
-数据载荷 = 12*65536 = 786432 字节
-恢复载荷 =  6*65536 = 393216 字节
-尾部补零 = 786432-700000 = 86432 字节
-L = 96 + 3*(8+32*6) + 16 + 16 = 728 字节
-每卷 V = 240+2*728+3*65536 = 198304 字节
-```
-
-恢复载荷比例为 `M/K=50%`，相对于补齐后的数据载荷；相对于所有编码载荷则为 `M/(K+M)`。它们都不是相对于原始文件总大小的压缩率，也不包含索引重复开销。
-
-公开索引最多 16 MiB；必须同时满足上述 L 公式。代码还先检查 `(data_blocks+recovery_blocks)*32 <=16 MiB`，但这个初筛不含组头和安全尾部，最终仍以完整序列化长度为准。名义 64 GiB 原始数据上限不代表所有 64 GiB 输入都可创建：不可压缩输入可能先触及块哈希表 / 索引限制。
-
-空目录输入也生成私有索引记录，S 不必为零；最小条带数仍为 1，默认 10+2 仍有 12 个卷。profile 4 的卷大小自动推导，不能再指定 `--volume-size`、恢复百分比或恢复字节数。
-
-### 6.6 profile 5 几何与物理布局
-
-profile 5 只支持等大卷数模式：`1<=M<=K<=100`，保持 `d000000.rzv` / `p000000.rzr` 卷名及 `manifest.rzm` sidecar。原始内容与属性合计最多 **1 TiB**（`2^40=1099511627776` 字节）；路径、条目与私有目录限制见第 7、10 节。
+profile 5 只支持等大卷数模式：`1<=M<=K<=100`，保持 `d000000.rzv` / `p000000.rzr` 卷名及 `manifest.rzm` sidecar。原始内容与属性合计最多 **1 TiB**（`2^40=1099511627776` 字节）；路径、条目与私有目录限制见第 7 节。
 
 本节定义 `B=65536`、`R=B+32=65568`、`S` 为压缩/加密后的逻辑内容流长度、`b` 为 bootstrap 长度：
 
@@ -599,7 +366,7 @@ stripe = floor(q / K)
 
 内容区末尾补零至 D*K*B；索引逻辑流末尾补零至 I*K*B。每类条带分别生成 M 个恢复块；不得把 32 字节局部摘要放入 RS 载荷，或把内容区与索引区混为一条逻辑流。
 
-### 6.7 profile 5 卷头与 bootstrap 字段
+### 6.2 profile 5 卷头与 bootstrap 字段
 
 卷头和卷尾均为 120 字节：
 
@@ -635,7 +402,7 @@ bootstrap 的固定前缀如下：
 | 68 | u32 | P，摘要叶页数 |
 | 72 | u64 | root_size |
 | 80 | [32] | 完整根表的 BLAKE3 |
-| 112 | u32 | security_flags，与第6.4节相同 |
+| 112 | u32 | security_flags，加密=1、保存属性=2、独立密钥=4，其余位必须为零 |
 | 116 | u64 | 私有目录原始长度，1..16 MiB |
 | 124 | u32 | 私有目录帧数 n=ceil(original_size/F)，1..4 |
 | 128 | 16*n | 每帧依次写入 offset:u64、stored:u32、plain:u32 |
@@ -659,16 +426,16 @@ index_volume_hash_count:u32 = K+M
 index_volume_hashes[K+M][32]           # 先 K 个数据卷，再 M 个恢复卷
 ```
 
-密钥槽、flags 及私有目录帧连续性约束与第 5、6.4 节相同。私有目录最后一帧末尾必须等于 S；不能忽略尾随字节。尾部的 `index_volume_hashes` 无论是否加密都存在，且计数必须恰好等于 K+M。
+密钥槽使用第 5 节的定义。独立密钥标志要求同时设置加密位。私有目录帧的偏移和长度须连续。私有目录最后一帧末尾必须等于 S；不能忽略尾随字节。尾部的 `index_volume_hashes` 无论是否加密都存在，且计数必须恰好等于 K+M。
 
 ```text
 E = 0（不加密），140（suite 1），200（suite 2）
 b = 132 + 16*n + E + 32*(K+M) <= 8192
 ```
 
-b 不随内容块总数线性增长；与 profile 4 不同，bootstrap 不内嵌每条带的全部摘要。每卷首尾及 sidecar 复制相同 bootstrap，共 `2*(K+M)+1` 个副本，但仍至少需要一份可定位的有效副本才能开始恢复。
+bootstrap 的长度由卷数、密钥槽和私有目录帧数决定。每卷首尾及 sidecar 复制相同 bootstrap，共 `2*(K+M)+1` 个副本，但仍至少需要一份可定位的有效副本才能开始恢复。
 
-### 6.8 profile 5 摘要叶页、根表及局部摘要
+### 6.3 profile 5 摘要叶页、根表及局部摘要
 
 内容区的数据块和恢复块摘要沿用第 4.1 节的 `rz-block-v2` 域，`group_id=stripe`、`shard_id=column`。每个条带按列0..K+M-1连接摘要，再按条带号递增连接：
 
@@ -693,7 +460,7 @@ leaf_digest[P][32]
 
 根表长度为44+32*P，UUID/K/M/D/P 必须与 bootstrap 一致。根表摘要覆盖上述全部字节，不包含随后用于 RS 的尾部补零。
 
-索引逻辑流为 `leaf[0] || ... || leaf[P-1] || root`，根表起点为 P*B。它按第 6.6 节映射至索引区，使用相同 K/M、Cauchy 系数和 `0x11d`；索引条带号从0重新开始。索引块局部摘要为：
+索引逻辑流为 `leaf[0] || ... || leaf[P-1] || root`，根表起点为 P*B。它按第 6.1 节映射至索引区，使用相同 K/M、Cauchy 系数和 `0x11d`；索引条带号从0重新开始。索引块局部摘要为：
 
 ```text
 BLAKE3(
@@ -705,7 +472,7 @@ BLAKE3(
 
 内容区与索引区局部摘要不可互换。局部摘要用于定位普通擦除；单独验证局部摘要不能证明归档没有被主动改写。
 
-### 6.9 profile 5 索引卷摘要与认证链
+### 6.4 profile 5 索引卷摘要与认证链
 
 对每个物理卷 s，按索引条带号递增，计算包含局部摘要的整体摘要：
 
@@ -717,7 +484,7 @@ index_volume_hash[s] = BLAKE3(
 )
 ```
 
-它不包含卷头、bootstrap 或内容区，覆盖索引数据块、恢复块和尾部填充。结果写入 bootstrap。加密时，MAC 输入为第 6.7 节的**全部 bootstrap 字节**，仅将 public_mac 置零，保留包括索引卷摘要在内的其他字段。
+它不包含卷头、bootstrap 或内容区，覆盖索引数据块、恢复块和尾部填充。结果写入 bootstrap。加密时，MAC 输入为第 6.2 节的**全部 bootstrap 字节**，仅将 public_mac 置零，保留包括索引卷摘要在内的其他字段。
 
 读取内容的校验链为：bootstrap MAC（加密时）→ 根表摘要 → 叶页摘要 → 内容块预期摘要 → 记录 AEAD（加密时）→ 原始文件摘要。完整存储验证还必须核对每卷索引区整体摘要。
 
@@ -725,7 +492,7 @@ index_volume_hash[s] = BLAKE3(
 
 所需 MAC、AEAD 和索引校验必须通过后才发布相应结果。无凭据验证和修复仍只提供存储一致性；未加密归档的普通 BLAKE3 都可被攻击者重算，不提供数字签名或可信来源认证。
 
-### 6.10 profile 5 索引恢复与失败边界
+### 6.5 profile 5 索引恢复与失败边界
 
 完整验证和修复按以下次序处理：
 
@@ -741,9 +508,9 @@ index_volume_hash[s] = BLAKE3(
 
 任意 M 整卷丢失的保证要求剩余卷完整且有可定位 bootstrap。普通随机损坏在内容区和索引区分别按条带计算额度。对攻击者构造的自洽伪造，不保证所有理论可纠正分布都可恢复；必须发现不一致并拒绝未经验证的输出。
 
-所有可定位 bootstrap 失效时不能扫描裸块重建目录；`.rzkey` 不受 RS 保护。有效旧 profile sidecar、旧 profile 卷头或另一 UUID 混入时必须拒绝，不能把已验证的身份冲突当作普通缺卷。
+所有可定位 bootstrap 失效时不能扫描裸块重建目录；`.rzkey` 不受 RS 保护。有效的外部版本标记或另一 UUID 混入时必须拒绝，不能把已验证的身份冲突当作普通缺卷。
 
-### 6.11 profile 5 空间例子与取舍
+### 6.6 profile 5 空间例子与取舍
 
 仅演示几何：K=4、M=2、S=700000、未加密、私有目录1帧，因此 n=1、E=0：
 
@@ -758,15 +525,15 @@ sidecar = b+32 = 372 字节
 卷集总大小 = 6*V+372 = 1579524 字节
 ```
 
-数据块载荷786432字节，恢复块载荷393216字节；索引区、局部摘要和重复 bootstrap 另计。新格式减少大归档重复完整索引的开销，但增加 RS 索引条带的固定填充，小归档可能比 profile 4 更大。
+数据块载荷786432字节，恢复块载荷393216字节；索引区、局部摘要和重复 bootstrap 另计。小归档也需为索引区至少分配一个完整条带。
 
-公共摘要表通过分页扩展，私有目录仍为最多16 MiB的 `RZPRI003`；1 TiB上限不代表无限条目、任意路径分布或已完成1 TiB实盘测试。旧程序不能读取 profile 5，旧归档无需转换即可由新程序读取。
+公共摘要表通过分页扩展，私有目录仍为最多16 MiB的 `RZPRI003`；1 TiB上限不代表无限条目、任意路径分布或已完成1 TiB实盘测试。
 
 ## 7. 私有索引、条目与文件属性
 
 ### 7.1 私有索引 `RZPRI003`
 
-profile 4/5 **继续使用**以下 profile 3 布局。所列内容是解密、解压后字节：
+私有索引解密、解压后具有以下布局。
 
 ```text
 magic[8] = "RZPRI003"
@@ -805,7 +572,7 @@ repeat entry_count:
 
 每个文件帧的 plain 总和必须等于文件 original_size，数量必须为 `ceil(size/F)`；目录 original_size=0、无内容帧，摘要是 BLAKE3 空串。关闭属性保存时每个条目的属性长度和帧数均为 0；当前写入器此时写入全零 metadata_digest，解析器不把这个未使用字段当成空串摘要。保存属性时每条目属性长度必须非零，帧数为 `ceil(metadata_size/F)`，解码后核对属性摘要。
 
-条目总数最多100,000；内容与属性原始总量在 profile 3/4 中最多64 GiB，在 profile 5 中最多1 TiB；各版本私有索引本体仍限16 MiB。索引解析必须消耗所有字节，不能忽略尾随数据。
+条目总数最多100,000；内容与属性原始总量最多 1 TiB，私有索引本体限 16 MiB。索引解析必须消耗所有字节，不能忽略尾随数据。
 
 ### 7.2 属性记录 `RZMET001`
 
@@ -853,21 +620,9 @@ ctime、物理压缩状态、稀疏布局不承诺恢复；源目录没有快照
 
 ## 8. 读取、验证、修复和解压
 
-### 8.1 找到可用公开索引或启动元数据
+读取器校验 manifest.rzm 的摘要，扫描分卷的卷头和卷尾。即使 sidecar 丢失，也能从任意完好的封装定位 bootstrap。所有校验有效的封装必须使用相同版本和 UUID，并与卷名、几何和 bootstrap 摘要一致。损坏的副本计入 metadata_issues，已确认的版本或归档身份冲突直接报错。
 
-以下为 profile 1–4 的索引查找流程：
-
-1. 尝试 `manifest.rzm` 的长度、末尾摘要及索引结构。
-2. 扫描 `.rzv/.rzr`，检查 120 字节头 / 尾摘要和版本，用其中 L/P 定位索引副本。尾部作为提示时还要求实际文件长度与头部几何一致。
-3. 获得索引后，检查规范卷名、所有可解析卷头 / 尾的 UUID、profile、索引摘要和几何是否一致。遇到有效身份冲突必须报错，不能静默按多数投票选归档。
-4. 使用索引中的 L 和几何定位各卷载荷，即使该卷自身头尾坏了也可检查其块。
-5. 对 sidecar 及每个卷封装检查完整副本；缺失 / 不一致计入 `metadata_issues`。
-
-“至少一份有效索引”还包含**能够定位它**的要求。当前不扫描裸压缩流重建目录，也不在所有头尾和 sidecar 都失效时盲搜索引。全部可定位索引失效时，RS 载荷即使足够也无法启动修复。
-
-profile 5 查找的是至多8 KiB的 bootstrap，而非完整块摘要表。核对副本和所有有效卷身份后，根据 D/I/P 定位受保护索引区，再按第6.8–6.10节读取根表和叶页。bootstrap 全失效时具有相同的启动限制。
-
-### 8.2 不同命令提供不同保证
+### 不同命令提供不同保证
 
 | 操作 | 当前实际校验范围 |
 |---|---|
@@ -875,180 +630,18 @@ profile 5 查找的是至多8 KiB的 bootstrap，而非完整块摘要表。核�
 | `list` 已解锁 | 先认证公开索引，再检查读取私有索引所涉及的存储块、记录 AEAD 和目录结构；不等于所有文件已验证 |
 | `verify` 无凭据，加密归档 | 扫描全部数据 / 恢复块和封装副本；不提供加密认证 |
 | `verify` 有正确凭据 | 先认证公开索引；存储扫描返回 0 时进一步认证 / 解压私有索引、全部文件和属性并核对摘要 |
-| `verify` 未加密 profile 3/4/5 | 存储扫描返回 0 后同样核对私有索引、文件和属性 |
+| `verify` 未加密归档 | 存储扫描返回 0 后同样核对私有索引、文件和属性 |
 | `repair` | 重建存储块及封装，不要求凭据，不重新加密 |
 | `extract` | 认证所需密钥 / 索引、检查读取的数据块、按记录解压并核对文件摘要，按选项恢复属性；不自动修复内容区 |
-| 创建后复验，profile 3/4/5 | 重新打开暂存产物；加密时复用创建密钥完整认证、解压并核对内容及属性，不重复KDF |
+| 创建后复验 | 重新打开暂存产物；加密时复用创建密钥完整认证、解压并核对内容及属性，不重复KDF |
 
 若 `verify` 存储扫描返回 2/3，当前不会继续完整的私有记录验证；应先修复，再带凭据验证，不能把“已提供凭据”理解为所有内容已经认证。
 
 私有索引所在数据块损坏时，list 可返回 `directoryUnavailable=true` 并保留修复入口。它不能把损坏目录当成一个正常的空目录。
 
-### 8.3 修复顺序
+修复先重建索引区，再重建内容区。输出保留原始 UUID、密钥槽和密文，写入新目录后复验。提取按需校验所读记录涉及的内容块和索引页，按原顺序提交解压结果，再应用选定的文件属性。
 
-下列为 profile 1–4 的内容块恢复流程；profile 5 先完成第6.10节的索引区恢复和认证，再应用对应的内容恢复及最终复验。
-
-```text
-加载公开索引、校验身份
-对每个条带：
-    读取 K+M 块并检查摘要
-    收集擦除列表 missing
-    若 len(missing)>M：失败
-    RS.decode(blocks, missing)
-    对重建后全部块重新计算原索引中的 BLAKE3
-    一致才写入新卷集
-复制原公开索引，重建头尾和 sidecar
-重新打开完整输出卷集并复验
-同步后发布到新目录
-```
-
-修复保持 UUID、密钥槽、nonce、tag、公开索引及密文原值，在可修复损坏的预期条件下恢复原卷字节，不是创建另一个新归档。不修改输入卷，不生成新密钥，不用重新压缩填补坏块。
-
-### 8.4 解压顺序
-
-先取得凭据并认证公开索引或 bootstrap。profile 2–5 按需校验私有索引及文件记录涉及的完整存储块，不预扫全部数据/恢复载荷；profile 1 保留原有预检查路径。profile 5 还须核对根表及必要叶页。
-
-解开目录后，在私有暂存目录按安全路径创建文件，协调者读取记录，worker认证、解压，结果按原顺序写入并计算原文件BLAKE3，最后恢复选定属性、同步并发布。所需内容块损坏时要求先repair。
-
-缺少恢复卷或部分封装副本不必阻止提取，只要所需索引及读取的内容完整。profile 5可在内存恢复必要索引页；完整存储健康状态仍由verify检查。错误密码、错配密钥、认证失败、文件摘要不符或路径冲突均不得发布部分明文。
-
-## 9. 版本差异与旧版兼容规则
-
-### 9.1 差异总表
-
-| 项目 | profile 1 | profile 2 | profile 3 | profile 4 |
-|---|---|---|---|---|
-| 索引 / 卷头 / 卷尾后缀 | `001` | `002` | `003` | `004` |
-| 编码组 | 固定 10+2，每组可有多条带 | 每组最多 100 数据块，自适应 m | 同 profile 2 | 每条带 K+M；一组即一条带 |
-| 物理分卷 | 一个 shard 一卷，组内数据按 shard 顺序填充 | 全局块交错映射，用户指定卷上限 | 同 profile 2 | 恰好 K+M 个等大卷 |
-| 文件条目 | 公开索引中 | 公开索引中 | 私有索引中 | 同 profile 3 |
-| 属性 / 加密 | 不支持 | 不支持 | 支持 | 支持 |
-| 块摘要域 | `rz-block-v1`，含 stripe_id | `rz-block-v2` | `rz-block-v2` | `rz-block-v2` |
-| 整卷恢复保证 | 每组任意 2 卷，其他块及索引完整 | 取决于每组损坏分布 | 同 profile 2 | 任意 M 卷，其他块及索引完整 |
-
-profile 5 相对于 profile 4 的差异：
-
-| 项目 | profile 4 | profile 5 |
-|---|---|---|
-| 索引/卷头/卷尾后缀 | `004` | `005`，根表另为 `RZROOT05` |
-| 编码区域 | 内容区 | 内容区与索引区各自K+M编码 |
-| 每块物理记录 | 65536字节 | 65568字节，附32字节局部摘要 |
-| 摘要表冗余 | 全表在每卷首尾复制 | 分页表受RS保护，复制bootstrap |
-| 加密索引认证 | MAC直接覆盖全表 | MAC覆盖bootstrap，绑定根表和各索引卷摘要 |
-| 私有目录/记录加密 | `RZPRI003`、suite 1/2 | 沿用相同字节协议 |
-| 内容+属性上限 | 64 GiB，可能先触及公开索引限制 | 1 TiB，仍受16 MiB私有目录限制 |
-| 整卷恢复条件 | 剩余卷和至少一份公开索引完整 | 剩余卷完整且至少一份bootstrap可定位 |
-
-### 9.2 profile 1 必须保留的数学与布局
-
-```text
-K=10，M=2，B=65536
-A[r,c] = inverse_GF256(r XOR (2+c))
-block_hash = BLAKE3(ASCII("rz-block-v1") || UUID
-                   || LE32(group) || LE32(shard) || LE32(stripe)
-                   || block[65536])
-```
-
-一个组有效流长度为 valid，`stripes=max(1,ceil(valid/(10*B)))`，每 shard 载荷长 `stripes*B`。流依次填入 d00、d01…d09，同一块号横跨 12 卷形成条带；组摘要按 **shard-major 再 stripe** 排列。不能套用 profile 4 的“连续 K 个逻辑块一个条带”映射。
-
-卷名为 `gNNNNNN.dSS.rzv` / `gNNNNNN.pSS.rzr`。头部偏移 32/36 是 group/shard，而非后续版本的 volume/reserved。parity 文件编号 00/01 对应 shard 10/11。索引含组 stripes、valid 及所有哈希，随后直接写文件条目。
-
-profile 1 CLI 卷上限最多 1 GiB、恢复比例固定，最多 4096 组。完整历史字段见 [FORMAT.md](FORMAT.md)；不得用新版 Cauchy 系数替换其旧矩阵。
-
-### 9.3 profile 2/3 的恢复预算和分卷
-
-```text
-D = max(1, ceil(S/B))
-G = ceil(D/100)
-每组 k_i = min(100, 剩余数据块数)
-
-百分比模式：R = ceil(D * requested_value / 10000)
-             requested_value=100..10000，20% 写 2000
-容量模式：  R = ceil(requested_bytes/B)
-要求 G <= R <= D
-```
-
-每组先分配一个恢复块，剩余按 `k_i-1` 加权，用累计整数取整：
-
-```text
-W = D-G
-C_i = sum(j<=i, k_j-1)，C_-1=0
-m_i = 1 + floor(C_i*(R-G)/W) - floor(C_(i-1)*(R-G)/W)
-W=0 时每组 m_i=1
-```
-
-编码矩阵和块摘要与 profile 4 相同，但 group_id 是 100 数据块分组的组号；最后一组只使用实际 k。解析器须重算相同预算和分配，不能换成另一种“总额也为 R”的取整策略。
-
-设用户卷大小上限为 V、最终公开索引为 L：
-
-```text
-C = floor((V-240-2*L)/B)             # 每卷容量，必须 >=1
-DV = ceil(D/C)，PV = ceil(R/C)
-数据块 b：volume=b%DV，slot=b/DV
-恢复块 q：volume=q%PV，slot=q/PV     # q 按组、再恢复行累计
-```
-
-V 允许 1 MiB–16 GiB；每种卷最多 65,536 个。这里 blocks_per_volume=C 是**容量上限**，不意味着每个卷实际有 C 块；实际卷载荷最多相差一块。profile 4 则强制每卷恰好 T 块。
-
-profile 2/3 的索引不含偏移 56/60 的 K/M：`blocks_per_volume` 在偏移 56，S 在 60，data_blocks 在 68，recovery_blocks 在 76，group_count 在 84，组表从 88 开始。profile 2 组表后是文件条目；profile 3 组表后是第 6.4 节的安全尾部。
-
-套件 2 和密钥文件功能虽然不改变 profile 3 的容器编号，但早于该功能的读取器不认识 suite 2 或 bit2，会拒绝这些新文件。不能因此宣称“任意 profile 3 程序都能读任意 profile 3 归档”。
-
-## 10. 并行处理、资源限制与发布
-
-### 10.1 并行只改变调度
-
-`--threads auto|1..64` 是请求上限，不等于实际 worker 数。auto 以 CPU 并发数为起点；显式 N 不额外按 CPU 数截断，仍受任务数、64 上限及内存预算限制。
-
-| 阶段 | 当前实现 |
-|---|---|
-| 内容压缩 | 每 worker 独立复用 Zstd 上下文；4 MiB 独立帧，级别 3 |
-| 文件原始摘要 | 协调者按读取的原始字节顺序增量计算 |
-| 加密 / 记录提交 | 协调者按原帧顺序分配 offset、加密、更新索引、写流 |
-| profile 2/3/4/5 RS 创建 | 按组 / 条带并行，每 worker 独占 GF 上下文 |
-| RS 上下文初始化 | 启动线程前串行探测 CPU、分配表及构造上下文 |
-| 最终卷封装 | profile 4/5最多4路独立卷IO，回填头尾并同步；profile 2/3当前串行 |
-| 存储复验 | profile 2–5最多4路按物理卷顺序读取，累计各条带错误数 |
-| 内容认证、解密/解压 | profile 2–5使用有界保序池，每worker复用独立Zstd解码上下文 |
-| 属性、私有目录处理 | 捕获/序列化等仍串行，按需读取校验 |
-| profile 1 RS 创建与所有 repair | 当前串行调用 Jerasure |
-
-压缩池和 RS 池分阶段运行，不叠加。不得把使用全局可变 GF 状态的 Jerasure 接口直接移入并行 worker。
-
-压缩池每阶段估算预算 256 MiB，包括原始 / 压缩帧缓冲、Zstd 上下文及加密提交缓冲；在途队列最多为 worker 上限的两倍，按尚在途原始字节量按需启动 worker，小文件不会仅因数量多就启动满额线程。
-
-RS池同样以256 MiB预算约束上下文和块缓冲；每任务最多100+100个64 KiB块，即12.5 MiB载荷。worker不超过组数T，在途任务为 `min(T,2*workers)`；profile 4/5均匀条带的auto模式还受 `ceil(T*(K+M)*B/1MiB)` 限制。已完成未提交的任务也占额度。
-
-profile 4/5最终封装按卷数、请求线程数、工作量和文件句柄预算限制，最多4路IO。profile 2–5载荷直接写最终暂存卷，取消了整套临时分卷载荷的复制。异常或取消先停止派发并等待worker退出，再清理暂存。
-
-解密/解压池估算预算256 MiB，包括在途记录、明文结果、两层解密中间缓冲及解码上下文；最多两倍worker的在途任务，包括已完成未消费结果。协调者负责读取、块校验和保序提交，worker不共享可变卷缓存；敏感任务及解码器工作区在正常和异常退出时清零。
-
-创建时显式 `--threads N` 同样约束最终扫描及内容复验；独立verify/extract默认自动调度。profile 5按需生成均匀编码几何，不建立全量CodingGroup或逐块摘要表。
-
-同一压缩实现、相同未加密输入且关闭可变属性时，单 / 多线程的数据和恢复**载荷**应一致；完整归档仍因随机 UUID 而不同，块摘要亦绑定 UUID。加密结果还包含随机密钥、盐和 nonce，不能要求两次创建的密文完全相同。
-
-### 10.2 当前限制
-
-| 项目 | 限制 |
-|---|---|
-| 内容+属性原始总量 | profile 1–4：64 GiB；profile 5：1 TiB |
-| 逻辑存储流S | 各profile原始总量上限加其1%的整数向下取整余量 |
-| profile 1–4公开索引 | 16 MiB |
-| profile 5 bootstrap/根表 | 8 KiB/1 MiB；摘要表通过64 KiB页扩展 |
-| 私有目录索引 | profile 3/4/5均为16 MiB |
-| 每条目属性 / ACL / xattr 数 | 64 MiB / 1 MiB / 4096 |
-| 条目 / 路径 | 100,000 / 4096 字节 |
-| profile 4/5卷数 | `1<=M<=K<=100`，共2–200卷 |
-| profile 2/3 卷数 | 每种最多 65,536 |
-| 文件句柄缓存 | 按卷数和RLIMIT_NOFILE预算动态分配，多缓存/worker分摊并预留系统余量 |
-| 压缩/恢复/解密解压池预算 | 各256 MiB，分阶段使用；不是进程RSS上限 |
-| profile 5叶页缓存 | 每读取器最多16页，约1 MiB |
-| profile 5索引RS工作集 | 每条带最多200个64 KiB块，约12.5 MiB |
-| profile 5扫描错误计数 | 每内容条带2字节，最大流且K=1时约34 MiB |
-
-池预算不含驻留索引、分页缓存、扫描计数、属性、线程栈、分配器及检查器开销。压缩可能膨胀；profile 2–5临时磁盘包含逻辑流和正在写入的最终暂存卷，profile 5另有公开摘要页临时流，不再复制整套临时分卷载荷。仍须为恢复块和索引区预留空间。
-
-### 10.3 发布与故障处理
+## 9. 暂存、同步与发布
 
 输出父目录必须已存在，目标必须不存在，创建输出不能置于输入目录内。普通文件以 `O_EXCL` 独占创建；暂存目录位于同一父目录下的 `.rz-stage-*`，macOS 清除继承 ACL。文件和目录同步后，以禁止覆盖的 rename 发布。
 
@@ -1058,37 +651,9 @@ profile 4/5最终封装按卷数、请求线程数、工作量和文件句柄预
 
 正常异常、SIGINT、SIGTERM 会停止工作并清理未发布暂存；对断电、物理介质及文件系统崩溃的一致性不能从这些软件测试直接推定。
 
-## 11. CLI 与前端协议
+## 10. CLI 与前端协议
 
-### 11.1 常用命令
-
-以下从仓库根目录执行，输入应保持不变，各输出路径必须不存在：
-
-```sh
-# 明确使用最新容器，4 个数据卷 + 2 个恢复卷
-recovery/build/rz create input archive.rz --profile 5 --data-volumes 4 --recovery-volumes 2
-
-# 密钥文件保护；默认双层，在无 AES 设备上可显式选择 standard
-recovery/build/rz create input keyed.rz --profile 5 --generate-key-file
-
-# 密码由 stdin 提供，不能附加在 argv 中
-recovery/build/rz create input protected.rz --profile 5 --encrypt --password-stdin --encryption dual
-
-recovery/build/rz list keyed.rz --json
-recovery/build/rz list keyed.rz --json --no-auto-key-file
-recovery/build/rz verify keyed.rz
-recovery/build/rz verify keyed.rz --auto-key-file
-recovery/build/rz repair keyed.rz repaired.rz
-recovery/build/rz extract repaired.rz extracted --key-file keyed.rzkey
-
-# 显式保留旧版写入行为
-recovery/build/rz create input compatible.rz --profile 4 --data-volumes 4 --recovery-volumes 2
-recovery/build/rz create input legacy.rz --profile 3 --volume-size 64MiB --recovery-percent 20
-```
-
-K/M必须一起指定，可与 `--profile 4|5` 同用，不能与旧profile或容量/比例选项混用。仅指定K/M仍默认profile 4。容量输入支持B/KiB/MiB/GiB、最多三位小数、字节向下取整；百分比最多两位小数。未知、重复选项及互斥凭据来源须明确拒绝。
-
-### 11.2 退出码
+### 退出码
 
 | 码 | 含义 |
 |---:|---|
@@ -1102,7 +667,7 @@ K/M必须一起指定，可与 `--profile 4|5` 同用，不能与旧profile或�
 
 2/3 是 `verify` 的结构化损坏状态；超预算 `repair` 当前抛普通异常返回 **1**。AEAD / 公开索引 MAC 失败也可能返回 1，不能把所有加密相关失败统一当作 4。双层 AES 不可用返回一般错误，不会自动改用另一套件。
 
-### 11.3 JSON
+### JSON
 
 `list --json` 的外层 `version=1`；常用字段：
 
@@ -1113,14 +678,14 @@ K/M必须一起指定，可与 `--profile 4|5` 同用，不能与旧profile或�
 | preservesMetadata / requiresKeyFile | 是否保存属性 / 是否需要密钥文件 |
 | encryptionSuite | 0 未加密、1 标准、2 双层 |
 | entries | 已可用的 path、size、isDirectory；锁定时不能用空数组判定归档为空 |
-| recovery.profile | 磁盘 profile，profile 1 没有 recovery 对象 |
+| recovery.profile | 固定为 5 |
 | recovery.dataBytes | 补齐后数据块总字节数 |
 | recovery.payloadBytes | **恢复块**总字节数，不是全部卷的总载荷 |
-| recovery.volumeLimitBytes | 旧版卷上限；profile 4/5为0 |
+| recovery.volumeLimitBytes | 固定为 0 |
 | recovery.dataVolumes / recoveryVolumes | 实际物理卷数 |
-| recovery.requestedMode / requestedValue | profile 4/5为2/0；旧版为比例或字节参数 |
-| recovery.volumeSizeBytes | profile 4/5含封装的精确每卷大小；profile 5包含局部摘要和索引区 |
-| recovery.toleratedVolumeLosses | profile 4/5的M，受各自恢复条件限制 |
+| recovery.requestedMode / requestedValue | 卷数模式，固定为 2 和 0 |
+| recovery.volumeSizeBytes | 每卷精确大小，包含封装、局部摘要和索引区 |
+| recovery.toleratedVolumeLosses | 其余分卷完整时可恢复的缺卷数 M |
 | recovery.metadataBytesPerVolume | profile 5：`240+2*b+32*D+65568*I` |
 | recovery.contentLimitBytes | profile 5：1099511627776，即1 TiB |
 
@@ -1128,7 +693,7 @@ profile 5中，`dataBytes=D*K*65536`、`payloadBytes=D*M*65536`，均不含索�
 
 `extract --json` 返回 outputPublished、warningCount、metadataWarnings，最后一项最多 16 条但总数不截断。`--capabilities` 返回 `version=1` 及 aes256gcm 布尔值；它当前不是完整的 profile / suite 能力协商接口。
 
-### 11.4 进度与统计
+### 进度与统计
 
 使用 `--progress` 时，stderr 逐行输出 TAB 分隔进度：
 
@@ -1138,187 +703,12 @@ RZPROGRESS1<TAB>phase<TAB>processed<TAB>total<TAB>completed_files<TAB>files<TAB>
 
 phase 当前为 compressing、recovery、writing、verifying、completed。processed/total 是文件内容原始字节，不含属性；packed 是已提交的内容存储记录字节，加密时含 nonce/tag，不含属性、私有索引、恢复载荷和卷封装。elapsed_ms 为内容压缩阶段耗时，后续阶段不应据它推算该阶段速度。
 
-成功创建profile 2/3/4/5后另有 `RZTIMING1<TAB>{JSON}`，包括总时长、packing_us、compression_us、recovery_wall_us、读/RS/哈希累计工作时长、payload_write_us、index_us、volume_write_us、verify_us、publish_us，以及recovery_workers、recovery_peak_jobs、recovery_estimated_bytes、volume_write_workers。
+成功创建归档后另有 `RZTIMING1<TAB>{JSON}`，包括总时长、packing_us、compression_us、recovery_wall_us、读/RS/哈希累计工作时长、payload_write_us、index_us、volume_write_us、verify_us、publish_us，以及recovery_workers、recovery_peak_jobs、recovery_estimated_bytes、volume_write_workers。
 
-当前profile 3–5的 `verify_us` 包含创建后的完整内容复验，加密时包含认证解密，不能与旧版仅做密文存储复验的数值直接作同强度比较。`payload_write_us` 为暂存卷载荷写入，`volume_write_us` 为封装回填和同步；profile 5的 `index_us` 还包含分页索引构建、索引RS编码及bootstrap认证。
+当前的 `verify_us` 包含创建后的完整内容复验，加密时包含认证解密。`payload_write_us` 为暂存卷载荷写入，`volume_write_us` 为封装回填和同步；profile 5的 `index_us` 还包含分页索引构建、索引RS编码及bootstrap认证。
 
 worker 累计工作时长可相互重叠，且与载荷写入重叠，不能相加当作总耗时；compression_us 是 packing_us 的一部分。前端应按前缀识别所支持的协议，忽略新增统计行；不得更改已有字段顺序、单位或含义而保留旧前缀。
 
-## 12. 版本迭代规则
+## 实现与验证
 
-本节为后续维护要求，不能用“目前实验格式”作为静默改变已有归档解释方式的理由。
-
-### 12.1 三种兼容目标
-
-1. **新读旧：**新版必须保留已支持 profile / suite / 凭据类型的读取、验证、修复及解压能力，包括本次升级前的冻结样本。
-2. **旧读新：**只有新写入仍使用旧读取器支持的全部格式及功能时才要求成功。真正的新特性应让不支持的读取器明确拒绝，不能误解析或降级。
-3. **字节与行为稳定：**相同旧格式中的映射、数学结果、认证输入和退出状态语义不能因重构改变；线程数、硬件后端、缓存策略不得影响这些规则。
-
-安全加固可以拒绝原先错误接受的畸形输入，但必须证明冻结的合法历史归档继续可用，并记录拒绝范围，不能以“更严格”为由删除合法旧数据支持。
-
-### 12.2 变更如何编号
-
-| 拟修改内容 | 编号 / 兼容处理 |
-|---|---|
-| worker 调度、缓存、IO、SIMD、GF 后端优化 | 可保持 profile；结果及映射必须与旧实现一致 |
-| Zstd 实现 / 级别调整 | 在旧独立帧、大小及解码约束内可保持 profile，但必须旧读新；不要求跨库版本压缩字节相同 |
-| 换压缩算法、引入字典、改变帧大小或帧串联语义 | 新容器 profile 或先设计有版本的压缩能力字段；现有 profile 无算法协商空间 |
-| 改 64 KiB 块、RS 多项式 / 矩阵、补零、组预算或卷映射 | 新 profile；旧分支原样保留 |
-| 改公开索引字段宽度、顺序、卷头结构或必需语义 | 新 profile / 对应 magic；不得直接附加未定义尾部 |
-| 新 AEAD、KDF 成本 / 上下文、AAD、nonce、标签或包装方案 | 新 suite 或先定义可区分的 KDF / 凭据版本；不能重定义 suite 1/2 的既有分支 |
-| 新功能位 | 分配未使用位并记录最低读取能力；旧读者明确拒绝，不宣称旧读新兼容 |
-| 私有索引 / 属性 / 密钥文件结构变化 | 新对应 magic，并提供容器可识别的能力或版本区分；保留旧结构解析 |
-| JSON 新可选字段 / 新统计行 | 消费者能忽略时可增量添加；改含义、类型、单位或必需字段则升级协议 |
-| CLI 默认、默认套件、参数解释、退出码改变 | 属于行为兼容变更，须显式迁移设计、回归和说明，不能因容器新增而顺带改变 |
-
-suite 2 和 key-file bit2 是当前“按显式判别值扩展”的实例：旧 suite 1 密码路径字节保持不变，新功能由不支持的读者拒绝。后续不得把“profile 相同”当成唯一能力检查。
-
-### 12.3 不可静默更改清单
-
-- 所有现有 magic、版本、枚举、位含义、字段字节宽度、小端序、保留零字段及无尾随字节要求。
-- `F=4194304`、`B=65536`、各 profile 的填充、组编号、shard 编号、路径排序及连续记录映射。
-- profile 1与2/3/4/5各自的RS矩阵、`0x11d`、逐字节域表示、恢复行次序、内容块摘要域和profile 5索引块独立域。
-- 密码原始字节处理、Argon2id13 固定参数、密钥文件来源标志和两种凭据隔离。
-- KDF context 的精确 8 字节、ID、所有 AAD 域与字段顺序、nonce 规则、标签长度、公开索引 MAC 规范化输入。
-- 旧头部偏移32/36的两种语义，profile 4/5仍复用 `RZPRI003` 和内容区 `rz-block-v2` 的事实。
-- profile 5的65568字节块记录、D/P/I公式、根表字段、索引卷摘要次序，以及包含全部bootstrap尾部的MAC输入。
-- 原始文件摘要、属性摘要和普通存储摘要的覆盖范围，及“无凭据修复不等于加密认证”的操作语义。
-- 修复保留 UUID 与原密文字节、既有输出不覆盖、失败不发布半成品、先发布密钥再发布归档的行为。
-
-禁止“顺手统一”旧版与新版的域名、字段或算法常量。禁止遇到未知 suite 后尝试已知算法直到某个成功，禁止无 AES 时静默降低安全模式。
-
-### 12.4 演进步骤
-
-1. 变更前保存发布版二进制、固定归档、创建选项、明文预期及摘要，先用新版代码跑旧样本确认当前基线。
-2. 将改动归类为实现优化或格式 / 行为扩展，明确“新读旧”“旧读新”的支持范围。
-3. 格式扩展先定义编号、字段、公式、认证覆盖和资源限额，再写读取器；保留显式旧版创建路径。
-4. 同步提供黄金向量、负向测试、旧版样本和跨版本双向测试；不要让新 writer 与新 reader 的同一个错误相互掩盖。
-5. 新读取能力先于默认写入策略发布；只有前端具备读取能力后才切换默认。CLI无卷数的profile 3默认、仅卷数的profile 4默认继续保留；GUI随新读取器显式切换为profile 5。
-6. 更新本文、专项格式说明、CLI / GUI 文案及验证记录，记录实际执行平台与未完成验证。
-
-### 12.5 已有归档的迁移边界
-
-repair 是原样重建，不能顺便升级 profile、改 K/M 或轮换密码。当前没有原地追加、重分卷、追加恢复行、修改密码或密钥轮换命令。
-
-当前迁移路径是：带凭据验证旧归档 → 解压到新目录 → 检查内容及属性警告 → 用明确目标 profile / suite 创建新归档及新密钥 → 再验证 / 解压比对 → 由调用者决定何时退休旧归档。迁移属性受平台恢复政策限制，不保证跨系统无损。
-
-不得对加密数据仅修改索引中的 offset、UUID 或几何后宣称重封装完成：offset/UUID 参与 AEAD，几何和块摘要参与索引 MAC。新创建应生成新的 UUID、主密钥、盐与所需随机 nonce；复用旧主密钥重写 suite 2 相同位置可能重用其每记录 AES 密钥及 nonce。
-
-## 13. 兼容性验证与发布检查表
-
-### 13.1 当前已有测试
-
-上轮profile 5实现的验证记录（2026-09-27）：Release **24/24**、ASan/UBSan **24/24**，TSan选定的6个并发相关入口通过，macOS Swift 59个测试函数通过。Profile5黑盒最终19个用例另行复测通过。实际65 GiB稀疏输入创建及完整校验通过；1 TiB仅完成有界合成几何测试，未完成同规模实盘测试。详情见 [VALIDATION.md](VALIDATION.md)。本次仅整合文档，不将既有结果表述为本次重新执行。
-
-以 [CMakeLists.txt](../CMakeLists.txt) 注册项为准，当前24个CTest入口：
-
-| 测试入口 | 主要保证 |
-|---|---|
-| codec / codec_scalar | 摘要向量、Zstd 独立帧、RS 与独立 GF 运算对照、擦除恢复 |
-| format / configurable_format | 长度、偏移、路径、几何、截断及畸形输入拒绝 |
-| crypto / dual_crypto / key_file_codec | AEAD 向量、包装、AAD、KDF / 凭据隔离和索引认证 |
-| metadata | 属性序列化及约束 |
-| compression_pool / recovery_pool / recovery_pool_scalar | 有界队列、按序提交、独立上下文及后端一致性 |
-| fault_injection / configurable | 旧布局、缺卷 / 坏块、索引回退、超预算、清理与发布 |
-| protected_archive / dual_archive / no_aes / key_file | 加密 / 属性、旧样本、无 AES、密钥匹配与密文修复 |
-| parallel_archive / parallel_recovery | 线程参数、载荷一致性、失败和取消 |
-| counted_volumes | profile 4 的等大卷、任意 M 卷缺失、私有索引 / 属性保护、资源与参数边界 |
-| decompression_pool | 有界保序解密/解压、异常清零、取消、上下文复用及大偏移约束 |
-| paged_format | profile 5的1 TiB几何、bootstrap/根表/卷头边界、MAC及旧上限保持 |
-| paged_security | 索引载荷与局部摘要一起伪造、混合损坏、预算内精确恢复和超限不发布 |
-| paginated_archive | profile 5多页、缺卷、索引RS、启动回退、混入旧profile拒绝、冻结样本及前端默认兼容 |
-
-`counted_volumes` 覆盖4+2的全部15种两卷丢失组合、1+1/3+1/7+3/10+2/100+100、空归档、补齐、混合损坏、超预算不发布、索引回退、标准/双层密码及标准密钥文件、单/多线程载荷一致、句柄限制、按需提取和失败清理。双层测试依赖硬件能力，检查报告时须确认是否跳过。
-
-### 13.2 已有冻结样本
-
-以下是测试用公开样本，不能用新程序重新生成后覆盖来“修复”兼容失败：
-
-| 样本 | 用途 | SHA-256 |
-|---|---|---|
-| [profile1.tar.gz](../tests/fixtures/profile1.tar.gz) | 旧 profile 1 | `c20ed5c08bd13c8b775507a61d588d6bbaf17e9b75d91a524b601915ba880834` |
-| [profile2.tar.gz](../tests/fixtures/profile2.tar.gz) | 旧 profile 2 | `d30ac0bf122d797ffb765531b119283b7d93e3e7d90252cb9905cbab5b76d57c` |
-| [profile3-standard.tar.gz](../tests/fixtures/profile3-standard.tar.gz) | 增加 suite 2 之前的 profile 3 / suite 1 | `7ce5988197eb4469d19ffbc09bfb751ae20d45da34c52b3987fa554532d6eb68` |
-| [profile5.tar.gz](../tests/fixtures/profile5.tar.gz) | profile 5，K=2/M=1，无加密、无属性，固定legacy.txt | `402d601b563acd401bfc8993e8fc92ec61ba6ac806eb5d047ecd2617971eca4a` |
-
-suite 1 样本的公开测试密码为 `fixture-password`。历史样本测试见 `test_protected.py::test_legacy_fixed_fixtures_remain_readable`、`test_frozen_standard_encryption_fixture`，另有 profile 1 的旧版修复回归。摘要用于防止样本被无意替换，不代替归档内验证。
-
-Profile5样本读取见 `test_paginated.py`，预期文件内容为 `RZ profile 5 compatibility fixture\n`，末尾为一个LF。
-
-**尚待补齐：**当前fixtures没有冻结的profile 4归档，也没有suite 2或密钥文件模式的冻结归档，尚无持续自动执行的完整发布二进制双向互操作矩阵。动态往返测试不等同于冻结历史证据；下次涉及格式/加密/序列化变更前，应先以当前基线补齐相应样本。
-
-建议新增样本至少覆盖：profile 4 未加密、suite 1/2 密码、suite 1/2 密钥文件；多帧内容、跨块 / 跨条带、二进制属性、空文件 / 目录。每份保存原程序版本 / 源码 revision、创建参数、fixture SHA-256、文件预期摘要和明确标记的测试凭据；不要提交真实用户秘密。
-
-### 13.3 双向互操作矩阵
-
-| 生产者 → 消费者 | 必须检查 |
-|---|---|
-| 历史发布 writer → 新 reader | list / verify / extract；带凭据认证；模拟预算内损坏后 repair 再验证 |
-| 新 writer，以旧 profile / suite / flags 写入 → 支持这些能力的旧 reader | 同样读取、验证、修复、解压；不能只测新版往返 |
-| 新 writer，启用旧 reader 不支持的功能 → 旧 reader | 明确拒绝，无降级、无部分明文发布 |
-| 单线程 ↔ 多线程、NEON ↔ scalar | 固定输入下编码载荷一致，跨后端修复结果一致 |
-| macOS ↔ Linux | 结构、内容与修复互通；属性差异按政策明确报告，不冒充逐项还原 |
-
-固定密码也不会使随机加密归档确定化。比较新旧实现时，使用同一冻结归档进行读取 / 修复，或在**测试专用**构造中固定完整输入与密码学向量；不得为了测试在生产环境引入固定随机种子、nonce 或主密钥。
-
-### 13.4 发布前检查
-
-- [ ] 确认变更涉及的 profile、suite、magic、flags、默认行为和前端协议；文档逐项说明。
-- [ ] 所有旧冻结样本保持摘要不变，并通过新版读取 / 验证 / 恢复检查。
-- [ ] 原格式优化通过“新版写、旧版读”；新功能通过“旧版明确拒绝”。
-- [ ] RS 与独立 GF 运算逐字节对照，测试最大额度擦除和超额度拒绝。
-- [ ] 块 / 索引 / nonce / tag / AAD / KDF 成本篡改、尾随字节、溢出和未知字段拒绝回归通过。
-- [ ] 目录、空文件、尾部填充、跨帧 / 块 / 条带、私有索引与属性损坏路径通过。
-- [ ] 无凭据密文修复、修复后正确凭据解压、缺钥和无 AES 路径通过。
-- [ ] 取消、写失败、目标晚到冲突不覆盖既有文件、不发布不完整结果。
-- [ ] 改并发代码时通过 TSan；改解析、内存或依赖时通过 ASan/UBSan；对应 CI 平台结果已核对。
-- [ ] 确认命令默认值、退出码、JSON 单位和旧 GUI 进度解析未发生静默变化。
-- [ ] 更新验证记录，区分本地执行、历史记录、远程 CI、跳过项和仍待验证项。
-
-在仓库根目录可使用以下现有命令，构建目录分别隔离：
-
-```sh
-cmake -S recovery -B recovery/build -DCMAKE_BUILD_TYPE=Release
-cmake --build recovery/build --parallel 4
-ctest --test-dir recovery/build --output-on-failure
-
-cmake -S recovery -B recovery/build-sanitize -DCMAKE_BUILD_TYPE=RelWithDebInfo -DRZ_SANITIZE=ON
-cmake --build recovery/build-sanitize --parallel 4
-UBSAN_OPTIONS=halt_on_error=1 ctest --test-dir recovery/build-sanitize --output-on-failure
-
-cmake -S recovery -B recovery/build-tsan -DCMAKE_BUILD_TYPE=RelWithDebInfo -DRZ_THREAD_SANITIZE=ON
-cmake --build recovery/build-tsan --parallel 4
-TSAN_OPTIONS=halt_on_error=1 ctest --test-dir recovery/build-tsan --output-on-failure
-```
-
-上述命令是复验流程，不表示本文编写期间重新执行了所有检查器或远程 CI。历史实测范围见 [VALIDATION.md](VALIDATION.md)。
-
-## 14. 实现导航与文档维护
-
-| 源文件 | 核对入口 |
-|---|---|
-| [codec.cpp](../src/codec.cpp) / [codec.hpp](../src/codec.hpp) | compress_frame、decompress_frame、block_hash_v2、RecoveryEncoder、ReedSolomon |
-| [inputs.cpp](../src/inputs.cpp) | 输入规划、pack_contents、原始文件摘要、按序提交 |
-| [format.cpp](../src/format.cpp) / [binary.hpp](../src/binary.hpp) | 路径、通用条目、小端序列化、profile 1 |
-| [configurable_format.cpp](../src/configurable_format.cpp) | configure、serialize、parse_configurable_manifest、头尾、预算 / 几何 |
-| [configurable_archive.cpp](../src/configurable_archive.cpp) | profile 2–4读写及分页格式分派、按需块校验、并行扫描和提取 |
-| [paged.hpp](../src/paged.hpp) / [paged_format.cpp](../src/paged_format.cpp) | profile 5限额、paged_layout、bootstrap、根表、索引摘要域和卷头 |
-| [paged_create.cpp](../src/paged_create.cpp) | 流式建页、两个RS区域、索引卷摘要、bootstrap认证、创建复验 |
-| [paged_archive.cpp](../src/paged_archive.cpp) | bootstrap回退、页缓存、局部/整体校验、可疑索引列、修复与提取 |
-| [crypto.cpp](../src/crypto.cpp) | slot_aad、record_aad、password_key、ArchiveKeys、密钥文件 |
-| [protected.cpp](../src/protected.cpp) | 记录次序、private_index / parse_private、sign_manifest、认证和属性读取 |
-| [metadata.cpp](../src/metadata.cpp) | RZMET001、捕获 / 恢复政策 |
-| [compression_pool.cpp](../src/compression_pool.cpp) / [recovery_pool.cpp](../src/recovery_pool.cpp) | 内存估算、调度、有界队列及故障收束 |
-| [decompression_pool.cpp](../src/decompression_pool.cpp) | 可复用解码器、有界保序解密/解压、敏感任务清零 |
-| [io.cpp](../src/io.cpp) | O_NOFOLLOW、短IO、定位写、Staging、commit_with_key |
-| [main.cpp](../src/main.cpp) | CLI 默认、参数、凭据发现、JSON、退出码 |
-| [compression_progress.hpp](../src/compression_progress.hpp) / [creation_timing.hpp](../src/creation_timing.hpp) | 进度与统计协议 |
-
-专项格式文档：[profile 1](FORMAT.md)、[profile 2](FORMAT-V2.md)、[profile 3](FORMAT-V3.md)、[profile 4](FORMAT-V4.md)、[profile 5](FORMAT-V5.md)、[suite 2](ENCRYPTION-SUITE-2.md)、[密钥文件](KEY-FILES.md)。旧文档中“新写入器默认”可能指当时版本，当前默认以本文第1.2节及 `main.cpp` 为准。当前工作区未找到独立的recovery.yml工作流，不能把本地检查器结果表述为远程CI已通过。
-
-每次格式相关修改应同步更新受影响章节和专项说明，保留旧编号定义与样本；不要只覆盖“最新版说明”而丢失历史解析依据。代码与文档不符时先根据历史样本和发布实现确定旧行为，再决定修正实现还是为新行为分配新编号。
-
-| 文档日期 | 基线 / 更新内容 |
-|---|---|
-| 2026-09-27 | 初次统一整理工作区 CLI 0.6.0 / profile 4，纳入 suite 1/2、RZKEY001、profile 1/2/3 差异与兼容性维护要求 |
-| 2026-09-27 | 整合CLI 0.7.0/profile 5完整布局、分页摘要及RS索引区、bootstrap/索引卷认证、1 TiB上限、并行读取、JSON扩展、冻结样本和既有验证记录 |
+磁盘布局与测试入口见 [第 5 版格式说明](FORMAT-V5.md)。CLI 示例和构建步骤见 [后端使用说明](../README.md)。固定归档样本为 [profile5.tar.gz](../tests/fixtures/profile5.tar.gz)。修复后每卷的字节应与原始完好卷完全相同。

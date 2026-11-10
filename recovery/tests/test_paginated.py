@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Profile 5: protected index pages, redundant bootstrap and legacy CLI defaults."""
+"""Profile 5: protected index pages, redundant bootstrap and version boundaries."""
 import itertools
 import hashlib
 import json
@@ -112,17 +112,28 @@ class PaginatedIndexTest(unittest.TestCase):
         shutil.rmtree(fixed)
         shutil.rmtree(output)
 
-    def test_explicit_profile_and_legacy_defaults(self):
-        self.assertEqual(info(self.archive)['recovery']['profile'], 5)
-        for name, args, expected in [
-            ('default', [], 3),
-            ('counted', ['--data-volumes', 4, '--recovery-volumes', 2], 4),
-            ('explicit4', ['--profile', 4], 4),
-            ('explicit5', ['--profile', 5], 5),
-        ]:
-            archive = self.work / name
-            run('create', self.source, archive, *args)
-            self.assertEqual(info(archive)['recovery']['profile'], expected)
+    def test_only_profile5_can_be_created(self):
+        for command in ('create', 'create-selected'):
+            for name, args, counts in [
+                ('default', [], (10, 2)),
+                ('counted', ['--data-volumes', 4, '--recovery-volumes', 2], (4, 2)),
+                ('explicit', ['--profile', 5], (10, 2)),
+            ]:
+                archive = self.work / (command + name)
+                if command == 'create':
+                    run(command, self.source, archive, *args)
+                else:
+                    run(command, archive, *args, '--', self.source / 'data')
+                details = info(archive)['recovery']
+                self.assertEqual((details['profile'], details['dataVolumes'], details['recoveryVolumes']), (5, *counts))
+            for args in (['--profile', 1], ['--profile', 2], ['--profile', 3], ['--profile', 4],
+                         ['--volume-size', '1MiB'], ['--recovery-percent', 20], ['--recovery-bytes', '1MiB']):
+                archive = self.work / 'unsupported'
+                if command == 'create':
+                    run(command, self.source, archive, *args, code=1)
+                else:
+                    run(command, archive, *args, '--', self.source / 'data', code=1)
+                self.assertFalse(archive.exists())
 
     def test_frozen_profile5_fixture_remains_readable(self):
         archive = self.work / 'frozen'
@@ -139,24 +150,6 @@ class PaginatedIndexTest(unittest.TestCase):
         output = self.work / 'frozen-output'
         run('extract', archive, output)
         self.assertEqual((output / 'legacy.txt').read_bytes(), b'RZ profile 5 compatibility fixture\n')
-
-    def test_profile4_sidecar_in_profile5_set_is_rejected(self):
-        legacy = self.work / 'legacy'
-        run('create', self.source, legacy, '--profile', 4, '--data-volumes', 4, '--recovery-volumes', 2)
-        broken = self.damaged()
-        shutil.copyfile(legacy / 'manifest.rzm', broken / 'manifest.rzm')
-        self.assertIn('Mixed archive IDs or profiles', run('list', broken, '--json', code=1).stderr)
-        run('repair', broken, self.work / 'failed', code=1)
-        self.assertFalse((self.work / 'failed').exists())
-
-    def test_profile4_volume_in_profile5_set_is_rejected(self):
-        legacy = self.work / 'legacy'
-        run('create', self.source, legacy, '--profile', 4, '--data-volumes', 4, '--recovery-volumes', 2)
-        broken = self.damaged()
-        shutil.copyfile(legacy / 'd000000.rzv', broken / 'd000000.rzv')
-        self.assertIn('Mixed archive IDs or profiles', run('list', broken, '--json', code=1).stderr)
-        run('repair', broken, self.work / 'failed', code=1)
-        self.assertFalse((self.work / 'failed').exists())
 
     def test_all_two_volume_losses_are_byte_exact_without_sidecar(self):
         for lost in itertools.combinations([file.name for file in volumes(self.archive)], 2):
@@ -353,15 +346,14 @@ class PaginatedIndexTest(unittest.TestCase):
         self.assertFalse((self.work / 'cancelled.rzkey').exists())
         self.assertFalse(list(self.work.glob('.rz-stage-*')))
 
-    def test_conflicting_options_are_rejected(self):
+    def test_invalid_volume_counts_are_rejected(self):
         for args in (
-            ('--profile', 5, '--volume-size', '1MiB'),
-            ('--profile', 5, '--recovery-percent', 20),
-            ('--profile', 5, '--recovery-bytes', '1MiB'),
-            ('--profile', 5, '--data-volumes', 4),
-            ('--profile', 5, '--data-volumes', 4, '--recovery-volumes', 5),
-            ('--profile', 5, '--data-volumes', 0, '--recovery-volumes', 1),
-            ('--profile', 5, '--data-volumes', 101, '--recovery-volumes', 1),
+            ('--recovery-volumes', 1),
+            ('--data-volumes', '2.5', '--recovery-volumes', 1),
+            ('--data-volumes', 4),
+            ('--data-volumes', 4, '--recovery-volumes', 5),
+            ('--data-volumes', 0, '--recovery-volumes', 1),
+            ('--data-volumes', 101, '--recovery-volumes', 1),
         ):
             run('create', self.source, self.work / 'invalid', *args, code=1)
             self.assertFalse((self.work / 'invalid').exists())
