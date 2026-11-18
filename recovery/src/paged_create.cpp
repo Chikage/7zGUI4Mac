@@ -1,4 +1,5 @@
 #include "paged.hpp"
+#include "container.hpp"
 #include "compression_progress.hpp"
 #include "read_progress.hpp"
 #include "recovery_pool.hpp"
@@ -107,7 +108,7 @@ size_t finalize_volumes(const fs::path& directory, const PagedBootstrap& bootstr
 }
 }
 void create_paged_archive(const InputPlan& plan, const fs::path& output, const RecoveryOptions& options,
-                          const SecurityOptions& security, bool report_progress, uint32_t threads) {
+                          const SecurityOptions& security, bool report_progress, uint32_t threads, bool directory_output) {
     validate_volume_counts(options.data_volumes, options.recovery_volumes);
     if (security.generate_key_file) {
         if (!security.encrypt || !security.password || !security.password->from_key_file) throw KeyFileError();
@@ -209,14 +210,16 @@ void create_paged_archive(const InputPlan& plan, const fs::path& output, const R
         File sidecar(staging.path / "manifest.rzm", File::Mode::New); auto digest = hash(encoded);
         sidecar.append(encoded); sidecar.append(digest.data(), digest.size()); sidecar.sync();
     }
+    const auto container = directory_output ? fs::path{} : pack_container(staging.path, bootstrap, encoded.size());
     timing.volume_write = elapsed_ns(phase_start); phase_start = TimingClock::now(); progress.phase("verifying");
     ReadProgress verification_progress;
-    verify_paged_created(staging.path, encoded, keys ? &*keys : nullptr, threads, report_progress ? &verification_progress : nullptr);
+    verify_paged_created(directory_output ? staging.path : container, encoded, keys ? &*keys : nullptr, threads,
+                         report_progress ? &verification_progress : nullptr);
     timing.verify = elapsed_ns(phase_start); phase_start = TimingClock::now();
     if (security.generate_key_file) {
         const auto key_path = staging.path / ".recovery-key"; write_key_file(key_path, manifest.uuid, *security.password);
-        staging.commit_with_key(key_path);
-    } else staging.commit();
+        staging.commit_with_key(key_path, container);
+    } else if (directory_output) staging.commit(); else staging.commit_file(container);
     progress.phase("completed"); timing.publish = elapsed_ns(phase_start);
     if (report_progress) timing.report(elapsed_ns(started), progress.compression_microseconds(), limits.workers, peak_jobs, limits.estimated_bytes);
 }

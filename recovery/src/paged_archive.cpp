@@ -1,4 +1,5 @@
 #include "paged.hpp"
+#include "container.hpp"
 #include "decompression_pool.hpp"
 #include "read_progress.hpp"
 #include <algorithm>
@@ -12,7 +13,8 @@
 namespace rz {
 namespace {
 struct Archive5 {
-    fs::path directory;
+    explicit Archive5(const fs::path& path) : storage(path) {}
+    ArchiveStorage storage;
     PagedBootstrap bootstrap;
     Bytes encoded;
     uint64_t metadata_issues = 0;
@@ -51,7 +53,7 @@ bool metadata_ok(const File& file, const Archive5& a, bool parity, uint32_t volu
     return true;
 }
 Archive5 load(const fs::path& directory) {
-    require_directory(directory); Archive5 a; a.directory = fs::canonical(directory);
+    Archive5 a(directory); a.metadata_issues = a.storage.metadata_issues();
     bool found = false;
     auto consider = [&](const Bytes& bytes) {
         if (foreign_profile(bytes, "RZIDX"))
@@ -61,7 +63,7 @@ Archive5 load(const fs::path& directory) {
         if (found && bytes != a.encoded) throw std::runtime_error("Conflicting profile 5 bootstraps");
         if (!found) { a.bootstrap = std::move(*parsed); a.encoded = bytes; found = true; }
     };
-    File sidecar(a.directory / "manifest.rzm", File::Mode::Read, true);
+    auto sidecar_file = a.storage.open("manifest.rzm"); auto& sidecar = *sidecar_file;
     const auto sidecar_size = sidecar.exists() ? sidecar.size() : 0;
     if (sidecar_size >= 32 && sidecar_size <= MaxManifest + 32) {
         auto bytes = read_bytes(sidecar, 0, static_cast<size_t>(sidecar_size));
@@ -72,13 +74,11 @@ Archive5 load(const fs::path& directory) {
     }
     std::vector<fs::path> candidates;
     std::vector<std::pair<fs::path, PagedHeader>> hints;
-    for (const auto& entry : fs::directory_iterator(a.directory)) {
-        if (entry.path().extension() != ".rzv" && entry.path().extension() != ".rzr") continue;
-        if (candidates.size() == 200) throw std::runtime_error("Too many profile 5 volumes");
-        candidates.push_back(entry.path()); File file(entry.path());
+    for (const auto& name : a.storage.volumes()) {
+        candidates.push_back(name); auto member = a.storage.open(name, File::Mode::Read, false); auto& file = *member;
         for (bool footer : {false, true}) {
             auto h = header(file, footer); if (!h) continue;
-            hints.emplace_back(entry.path(), *h);
+            hints.emplace_back(name, *h);
             if (!found) for (auto offset : {uint64_t(HeaderSize), HeaderSize + h->manifest_size + h->payload_size}) {
                 auto bytes = read_bytes(file, offset, static_cast<size_t>(h->manifest_size));
                 if (bytes && hash(*bytes) == h->manifest_hash) consider(*bytes);
@@ -86,6 +86,7 @@ Archive5 load(const fs::path& directory) {
         }
     }
     if (!found) throw std::runtime_error("No valid profile 5 bootstrap remains");
+    a.storage.validate(a.bootstrap, a.encoded.size());
     const auto& m = a.bootstrap.manifest; std::set<std::string> names;
     for (bool parity : {false, true}) for (uint32_t v = 0; v < m.options.volume_count(parity); ++v) names.insert(volume_name(parity, v));
     for (const auto& p : candidates) if (!names.contains(p.filename().string())) throw std::runtime_error("Unexpected profile 5 volume filename");
@@ -99,8 +100,8 @@ Archive5 load(const fs::path& directory) {
     auto actual = sidecar.exists() && sidecar.size() == expected.size() ? read_bytes(sidecar, 0, expected.size()) : std::nullopt;
     if (!actual || *actual != expected) ++a.metadata_issues;
     for (bool parity : {false, true}) for (uint32_t v = 0; v < m.options.volume_count(parity); ++v) {
-        File file(a.directory / volume_name(parity, v), File::Mode::Read, true);
-        if (!metadata_ok(file, a, parity, v)) ++a.metadata_issues;
+        auto file = a.storage.open(volume_name(parity, v));
+        if (!metadata_ok(*file, a, parity, v)) ++a.metadata_issues;
     }
     return a;
 }
@@ -119,8 +120,8 @@ public:
                 files_.erase(oldest);
             }
             const auto k = a_.bootstrap.manifest.options.data_volumes;
-            auto path = a_.directory / volume_name(column >= k, column >= k ? column-k : column);
-            it = files_.emplace(column, Cached{std::make_unique<File>(path, mode_, mode_ == File::Mode::Read), 0}).first;
+            auto name = volume_name(column >= k, column >= k ? column-k : column);
+            it = files_.emplace(column, Cached{a_.storage.open(name, mode_, mode_ == File::Mode::Read), 0}).first;
         }
         it->second.age = ++age_; return *it->second.file;
     }
@@ -325,7 +326,7 @@ Verification scan(const Archive5& a, uint32_t requested = 0, ReadProgress* progr
             Bytes block(PagedRecordSize);
             while (!stopped.load(std::memory_order_relaxed)) {
                 const auto column = next.fetch_add(1); if (column >= k+m) break;
-                File file(a.directory/volume_name(column >= k, column >= k ? column-k : column), File::Mode::Read, true);
+                auto member = a.storage.open(volume_name(column >= k, column >= k ? column-k : column)); auto& file = *member;
                 for (uint32_t stripe = 0; stripe < b.layout.data_stripes; ++stripe) {
                     check_cancel(); if (stopped.load(std::memory_order_relaxed)) return;
                     block.resize(PagedRecordSize); Digest local{};
@@ -387,9 +388,9 @@ void verify_paged_created(const fs::path& directory, const Bytes& expected_boots
     if (a.encoded != expected_bootstrap || scan(a, threads, progress).exit_code() != 0) throw std::runtime_error("Created profile 5 storage verification failed");
     verify_contents(a, keys, threads, progress);
 }
-void repair_paged_archive(const fs::path& directory, const fs::path& output) {
-    auto a = load(directory); require_outside(a.directory, output); Staging stage(output);
-    Archive5 out = a; out.directory = stage.path;
+void repair_paged_archive(const fs::path& directory, const fs::path& output, bool directory_output) {
+    auto a = load(directory); require_outside(a.storage.path(), output); Staging stage(output);
+    Archive5 out = a; out.storage = ArchiveStorage(stage.path);
     const auto& b = a.bootstrap; const auto k = b.manifest.options.data_volumes, m = b.manifest.options.recovery_volumes;
     for (uint32_t s = 0; s < k+m; ++s) {
         File file(stage.path/volume_name(s >= k, s >= k ? s-k : s), File::Mode::New);
@@ -428,11 +429,13 @@ void repair_paged_archive(const fs::path& directory, const fs::path& output) {
         file.write(tail, a.encoded.data(), a.encoded.size()); file.write(tail+a.encoded.size(), back.data(), back.size()); file.sync();
     }
     { File sidecar(stage.path/"manifest.rzm", File::Mode::New); sidecar.append(a.encoded); auto h = hash(a.encoded); sidecar.append(h.data(), h.size()); sidecar.sync(); }
-    if (verify_paged_archive(stage.path).exit_code() != 0) throw std::runtime_error("Repaired profile 5 verification failed");
-    stage.commit();
+    const auto container = directory_output ? fs::path{} : pack_container(stage.path, b, a.encoded.size());
+    if (verify_paged_archive(directory_output ? stage.path : container).exit_code() != 0)
+        throw std::runtime_error("Repaired profile 5 verification failed");
+    if (directory_output) stage.commit(); else stage.commit_file(container);
 }
 ExtractionReport extract_paged_archive(const fs::path& directory, const fs::path& output, const Password* password, bool restore_attributes, ReadProgress* progress) {
-    auto a = load(directory); require_outside(a.directory, output); auto keys = authenticate_manifest(a.bootstrap.manifest, password);
+    auto a = load(directory); require_outside(a.storage.path(), output); auto keys = authenticate_manifest(a.bootstrap.manifest, password);
     VolumeCache files(a, File::Mode::Read); IndexReader index(a, files); Digests digests(a, index); StreamReader stream(a, files, digests);
     RecordReader read = [&](uint64_t o, uint32_t n) { return stream.read(o, n); };
     auto& manifest = a.bootstrap.manifest; unlock_index(manifest, read, keys ? &*keys : nullptr);

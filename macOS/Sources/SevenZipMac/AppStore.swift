@@ -157,7 +157,7 @@ final class AppStore {
         guard !isBusy else { return }
         let panel = NSOpenPanel()
         panel.title = "打开压缩包"
-        panel.message = "选择压缩包、可恢复 RZ 归档包，或其中任意分卷。"
+        panel.message = "选择压缩包、RZ 容器文件，或旧版 RZ 目录及其分卷。"
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
         panel.treatsFilePackagesAsDirectories = false

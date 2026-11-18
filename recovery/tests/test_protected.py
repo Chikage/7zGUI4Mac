@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
+from legacy_storage import legacy_args
 
 BIN = str(Path(sys.argv.pop(1)).resolve())
 DUAL = '--dual' in sys.argv
@@ -48,7 +49,7 @@ def get_attribute(path, name):
 def run(*args, password=None, code=0):
     if DUAL and args[0] in ('create', 'create-selected') and '--encrypt' in args and '--encryption' not in args:
         args = (*args, '--encryption', 'dual')
-    result = subprocess.run([BIN, *map(str, args)], input=None if password is None else password + '\n', capture_output=True, text=True)
+    result = subprocess.run([BIN, *map(str, legacy_args(args))], input=None if password is None else password + '\n', capture_output=True, text=True)
     if result.returncode != code:
         raise AssertionError(f'{args}: expected {code}, got {result.returncode}\n{result.stdout}\n{result.stderr}')
     return result

@@ -15,6 +15,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from legacy_storage import legacy_args
 
 BIN = str(Path(sys.argv.pop(1)).resolve())
 BLOCK, HEADER, RECORD = 65536, 120, 65568
@@ -22,7 +23,7 @@ CONTENT_LIMIT = 1024 ** 4
 
 
 def run(*args, code=0, **kwargs):
-    result = subprocess.run([BIN, *map(str, args)], capture_output=True, text=True, timeout=180, **kwargs)
+    result = subprocess.run([BIN, *map(str, legacy_args(args))], capture_output=True, text=True, timeout=180, **kwargs)
     if result.returncode != code:
         raise AssertionError(f'{args}: expected {code}, got {result.returncode}\n{result.stdout}\n{result.stderr}')
     return result

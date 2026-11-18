@@ -13,10 +13,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from legacy_storage import legacy_args
 
 BIN = str(Path(sys.argv.pop(1)).resolve())
 def run(*args, code=0):
-    p = subprocess.run([BIN, *map(str, args)], capture_output=True, text=True)
+    p = subprocess.run([BIN, *map(str, legacy_args(args))], capture_output=True, text=True)
     assert p.returncode == code, (args, p.returncode, p.stdout, p.stderr)
     return p
 def hashes(path):

@@ -110,7 +110,7 @@ void suite(const rz::fs::path& root, uint32_t crypto) {
     security.crypto_suite = crypto ? crypto : rz::CryptoProfile; security.password = credential;
     rz::RecoveryOptions options{2, 2};
     const auto original = root / "original";
-    rz::create_paged_archive(rz::directory_inputs(source, original), original, options, security, false, 2);
+    rz::create_paged_archive(rz::directory_inputs(source, original), original, options, security, false, 2, true);
     const auto pristine = snapshot(original); const auto b = read_bootstrap(original);
     if (!crypto) check_foreign_envelopes(original, root / "foreign", b);
     require(b.layout.hash_pages == 1 && b.layout.index_stripes == 1, "unexpected leaf/root fixture layout");
@@ -132,13 +132,13 @@ void suite(const rz::fs::path& root, uint32_t crypto) {
         require(result.bad_blocks >= columns.size(), "locally self-consistent forged index was not detected");
         if (columns.size() <= options.recovery_volumes) {
             require(result.exit_code() == 2 && result.unrecoverable_stripes == 0, "recoverable forged columns rejected");
-            rz::repair_paged_archive(attacked, repaired);
+            rz::repair_paged_archive(attacked, repaired, true);
             require(snapshot(repaired) == pristine, "repair did not restore exact original index and volumes");
             require(rz::verify_paged_archive(repaired, credential).exit_code() == 0, "repaired archive failed authentication");
             check_extraction(repaired, root / ("output-" + name), credential, content);
         } else {
             require(result.exit_code() == 3 && result.unrecoverable_stripes != 0, "excess forged columns not marked unrecoverable");
-            rejects([&] { rz::repair_paged_archive(attacked, repaired); }, "unrecoverable forged index published repaired output");
+            rejects([&] { rz::repair_paged_archive(attacked, repaired, true); }, "unrecoverable forged index published repaired output");
             require(!rz::fs::exists(repaired), "failed repair published partial output");
         }
         require(snapshot(attacked) == damaged, "repair modified damaged source records");
@@ -150,7 +150,7 @@ void suite(const rz::fs::path& root, uint32_t crypto) {
     // forgery in another stripe of the same recoverable index volume.
     options.data_volumes = options.recovery_volumes = 1;
     const auto narrow = root / "narrow-original";
-    rz::create_paged_archive(rz::directory_inputs(source, narrow), narrow, options, security, false, 2);
+    rz::create_paged_archive(rz::directory_inputs(source, narrow), narrow, options, security, false, 2, true);
     const auto narrow_pristine = snapshot(narrow); const auto narrow_b = read_bootstrap(narrow);
     require(narrow_b.layout.index_stripes >= 2, "mixed corruption needs multiple index stripes");
     const auto mixed = root / "mixed-corruption", mixed_repaired = root / "mixed-repair";
@@ -158,7 +158,7 @@ void suite(const rz::fs::path& root, uint32_t crypto) {
     forge_index(mixed, narrow_b, 0, 1); break_local_checksum(mixed, narrow_b, 1, 1);
     const auto mixed_snapshot = snapshot(mixed);
     require(rz::verify_paged_archive(mixed, credential).exit_code() == 2, "mixed corruption was not recoverable");
-    rz::repair_paged_archive(mixed, mixed_repaired);
+    rz::repair_paged_archive(mixed, mixed_repaired, true);
     require(snapshot(mixed_repaired) == narrow_pristine, "local checksum error masked same-volume index forgery");
     require(snapshot(mixed) == mixed_snapshot && snapshot(narrow) == narrow_pristine, "mixed repair modified source records");
     no_staging(root);

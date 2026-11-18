@@ -12,6 +12,8 @@ class File {
 public:
     enum class Mode { Read, New, Append, Update };
     explicit File(const fs::path& path, Mode mode = Mode::Read, bool optional = false);
+    // A bounded, read-only view of an already opened container inode.
+    File(const File& container, uint64_t offset, uint64_t length);
     ~File();
     File(const File&) = delete;
     File& operator=(const File&) = delete;
@@ -26,6 +28,8 @@ public:
     void sync();
 private:
     int fd_ = -1;
+    uint64_t base_ = 0, length_ = 0;
+    bool slice_ = false;
 };
 class Staging {
 public:
@@ -33,10 +37,12 @@ public:
     ~Staging();
     fs::path path;
     void commit(bool directories_already_synced = false);
-    void commit_with_key(const fs::path& key_file);
+    void commit_file(const fs::path& file);
+    void commit_with_key(const fs::path& key_file, const fs::path& file = {});
 private:
     fs::path destination_;
     bool committed_ = false;
+    bool published_file_ = false;
 };
 UUID random_uuid();
 void require_directory(const fs::path& path);

@@ -1,4 +1,5 @@
 #include "io.hpp"
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -34,13 +35,26 @@ File::File(const fs::path& path, Mode mode, bool optional) {
     }
 }
 File::~File() { if (fd_ >= 0) ::close(fd_); }
+File::File(const File& container, uint64_t offset, uint64_t length) : base_(offset), length_(length), slice_(true) {
+    constexpr auto maximum = static_cast<uint64_t>(std::numeric_limits<off_t>::max());
+    if (container.slice_ || offset > maximum || length > maximum - offset)
+        throw std::runtime_error("Invalid container extent");
+    check_cancel();
+    fd_ = ::fcntl(container.fd_, F_DUPFD_CLOEXEC, 0);
+    if (fd_ < 0) io_error("Cannot open container extent");
+}
 uint64_t File::size() const {
     struct stat s{};
     if (fd_ < 0 || ::fstat(fd_, &s)) throw std::runtime_error("Cannot stat file");
-    return static_cast<uint64_t>(s.st_size);
+    const auto size = static_cast<uint64_t>(s.st_size);
+    return slice_ ? std::min(length_, size > base_ ? size - base_ : 0) : size;
 }
 bool File::read(uint64_t offset, void* data, size_t size) const {
     if (fd_ < 0) return false;
+    constexpr auto maximum = static_cast<uint64_t>(std::numeric_limits<off_t>::max());
+    if (slice_ && (offset > length_ || size > length_ - offset)) return false;
+    if (offset > maximum - base_ || size > maximum - base_ - offset) return false;
+    offset += base_;
     auto* p = static_cast<uint8_t*>(data);
     while (size) {
         check_cancel();
@@ -52,6 +66,7 @@ bool File::read(uint64_t offset, void* data, size_t size) const {
     return true;
 }
 void File::append(const void* data, size_t size) {
+    if (slice_) throw std::runtime_error("Container extents are read-only");
     auto* p = static_cast<const uint8_t*>(data);
     while (size) {
         check_cancel();
@@ -62,6 +77,7 @@ void File::append(const void* data, size_t size) {
     }
 }
 void File::write(uint64_t offset, const void* data, size_t size) {
+    if (slice_) throw std::runtime_error("Container extents are read-only");
     constexpr auto maximum = static_cast<uint64_t>(std::numeric_limits<off_t>::max());
     if (offset > maximum || size > maximum - offset) throw std::runtime_error("File write exceeds supported offset");
     auto* p = static_cast<const uint8_t*>(data);
@@ -74,6 +90,7 @@ void File::write(uint64_t offset, const void* data, size_t size) {
     }
 }
 void File::resize(uint64_t size) {
+    if (slice_) throw std::runtime_error("Container extents are read-only");
     if (size > static_cast<uint64_t>(std::numeric_limits<off_t>::max())) throw std::runtime_error("File size exceeds supported offset");
     for (;;) {
         check_cancel();
@@ -119,7 +136,7 @@ Staging::Staging(const fs::path& destination) {
     }
 #endif
 }
-Staging::~Staging() { if (!committed_) { std::error_code ec; fs::remove_all(path, ec); } }
+Staging::~Staging() { if (!committed_ || published_file_) { std::error_code ec; fs::remove_all(path, ec); } }
 void Staging::commit(bool directories_already_synced) {
     check_cancel();
     std::vector<fs::path> directories{path};
@@ -139,6 +156,20 @@ void Staging::commit(bool directories_already_synced) {
     committed_ = true;
     sync_directory(destination_.parent_path());
 }
+void Staging::commit_file(const fs::path& file) {
+    if (file.parent_path() != path) throw std::runtime_error("Output file must be staged");
+    check_cancel();
+    { File ready(file); ready.sync(); }
+#ifdef __APPLE__
+    int result = ::renameatx_np(AT_FDCWD, file.c_str(), AT_FDCWD, destination_.c_str(), RENAME_EXCL);
+#elif defined(__linux__)
+    int result = static_cast<int>(::syscall(SYS_renameat2, AT_FDCWD, file.c_str(), AT_FDCWD, destination_.c_str(), RENAME_NOREPLACE));
+#endif
+    if (result != 0) io_error("Cannot publish output (destination must not exist)");
+    committed_ = true;
+    published_file_ = true;
+    sync_directory(destination_.parent_path());
+}
 UUID random_uuid() {
     UUID id{};
     if (::getentropy(id.data(), id.size()) != 0) io_error("Cannot obtain random archive ID");
@@ -149,7 +180,7 @@ fs::path recovery_key_path(const fs::path& archive) {
     if (key == archive) throw std::runtime_error("Archive and key file paths must differ");
     return key;
 }
-void Staging::commit_with_key(const fs::path& key_file) {
+void Staging::commit_with_key(const fs::path& key_file, const fs::path& file) {
     auto destination = recovery_key_path(destination_);
     struct stat original{};
     if (::lstat(key_file.c_str(), &original) || !S_ISREG(original.st_mode) || (original.st_mode & 0777) != 0600)
@@ -161,7 +192,7 @@ void Staging::commit_with_key(const fs::path& key_file) {
     try {
         sync_directory(destination_.parent_path());
         fs::remove(key_file);
-        commit();
+        if (file.empty()) commit(); else commit_file(file);
     } catch (...) {
         struct stat current{};
         if (!committed_ && ::lstat(destination.c_str(), &current) == 0 && current.st_dev == original.st_dev && current.st_ino == original.st_ino)

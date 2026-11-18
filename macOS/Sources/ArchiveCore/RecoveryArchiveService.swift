@@ -5,11 +5,13 @@ public enum RecoveryArchive {
     public static func keyFileURL(for archive: URL) -> URL {
         archive.deletingPathExtension().appendingPathExtension("rzkey")
     }
-    /// Resolve a Finder package, a CLI-created set directory, or any member volume.
+    /// Resolve a container file, a legacy set directory, or any loose member volume.
     public static func directory(for url: URL) -> URL? {
         guard url.isFileURL else { return nil }
         switch url.pathExtension.lowercased() {
-        case "rz": return URL(fileURLWithPath: url.path, isDirectory: true)
+        case "rz":
+            let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+            return URL(fileURLWithPath: url.path, isDirectory: isDirectory)
         case "rzv", "rzr", "rzm": return url.deletingLastPathComponent()
         default:
             if FileManager.default.fileExists(atPath: url.appendingPathComponent("manifest.rzm").path) {
@@ -106,10 +108,13 @@ actor RecoveryArchiveService {
         let result = try await run(
             ["list", directory.path, "--json"] + credentials, password: password, captureListing: true)
         try check(result)
-        let members = try fm.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey])
+        let values = try directory.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .fileSizeKey])
+        let members = values.isDirectory == true
+            ? try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey])
+                .filter { ["rzv", "rzr", "rzm"].contains($0.pathExtension) }
+            : [directory]
         var physicalSize: Int64 = 0
-        for url in members where ["rzv", "rzr", "rzm"].contains(url.pathExtension) {
+        for url in members {
             try Task.checkCancellation()
             let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
             if values.isRegularFile == true {
@@ -178,7 +183,8 @@ actor RecoveryArchiveService {
     ) async throws -> ArchiveExtraction {
         let credentials = try credentialArguments(password, keyFile: keyFile)
         return try await writeOutput(
-            to: destination, password: password, reportsMetadata: true, progress: progress, message: "正在校验、解压并恢复文件属性…"
+            to: destination, password: password, reportsMetadata: true, isDirectory: true,
+            progress: progress, message: "正在校验、解压并恢复文件属性…"
         ) { output in
             ["extract", directory.path, output.path, "--json", "--progress"] + credentials
                 + (restoreAttributes ? [] : ["--no-attributes"])
@@ -196,6 +202,7 @@ actor RecoveryArchiveService {
 
     private func writeOutput(
         to destination: URL, password: String = "", reportsMetadata: Bool = false, generatesKeyFile: Bool = false,
+        isDirectory: Bool = false,
         progress: @escaping @Sendable (EngineProgress) -> Void, message: String,
         arguments: (URL) -> [String]
     ) async throws -> ArchiveExtraction {
@@ -218,7 +225,7 @@ actor RecoveryArchiveService {
         let secured = acl_set_link_np(stage.path, ACL_TYPE_EXTENDED, emptyACL) == 0
         acl_free(UnsafeMutableRawPointer(emptyACL))
         guard secured else { throw ArchiveError.invalidInput("无法清除临时目录的继承权限，已停止操作。") }
-        let output = stage.appendingPathComponent("result", isDirectory: true)
+        let output = stage.appendingPathComponent("result", isDirectory: isDirectory)
         progress(EngineProgress(message: message))
         let result = try await run(
             arguments(output), password: password, captureListing: reportsMetadata,
@@ -272,7 +279,7 @@ actor RecoveryArchiveService {
         published = true
         try syncDirectory(destination.deletingLastPathComponent())
         return ArchiveExtraction(
-            url: URL(fileURLWithPath: destination.path, isDirectory: true), metadataWarningCount: count,
+            url: URL(fileURLWithPath: destination.path, isDirectory: isDirectory), metadataWarningCount: count,
             metadataWarnings: warnings)
     }
 

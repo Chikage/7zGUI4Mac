@@ -15,13 +15,14 @@ import sys
 import tempfile
 import time
 import unittest
+from legacy_storage import legacy_args
 
 BIN = str(Path(sys.argv.pop(1)).resolve())
 PASSWORD = 'parallel-archive-password'
 
 
 def run(*args, password=None, code=0, **kwargs):
-    result = subprocess.run([BIN, *map(str, args)], capture_output=True, text=True,
+    result = subprocess.run([BIN, *map(str, legacy_args(args))], capture_output=True, text=True,
                             input=None if password is None else password + '\n', timeout=60, **kwargs)
     if result.returncode != code:
         raise AssertionError(f'{args}: expected {code}, got {result.returncode}\n{result.stdout}\n{result.stderr}')

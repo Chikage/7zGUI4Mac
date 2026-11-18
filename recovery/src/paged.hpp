@@ -32,11 +32,12 @@ Digest index_block_hash(const UUID& uuid, uint32_t stripe, uint32_t column, cons
 Bytes make_paged_header(const PagedBootstrap& bootstrap, bool parity, uint32_t volume, bool footer);
 PagedHeader parse_paged_header(const Bytes& bytes, bool footer);
 void create_paged_archive(const InputPlan& plan, const fs::path& output, const RecoveryOptions& options,
-                          const SecurityOptions& security, bool report_progress = false, uint32_t threads = 0);
+                          const SecurityOptions& security, bool report_progress = false, uint32_t threads = 0,
+                          bool directory_output = false);
 ArchiveManifest list_paged_archive(const fs::path& directory, const Password* password = nullptr);
 Verification verify_paged_archive(const fs::path& directory, const Password* password = nullptr, ReadProgress* progress = nullptr);
 void verify_paged_created(const fs::path& directory, const Bytes& expected_bootstrap, const ArchiveKeys* keys, uint32_t threads = 0, ReadProgress* progress = nullptr);
-void repair_paged_archive(const fs::path& directory, const fs::path& output);
+void repair_paged_archive(const fs::path& directory, const fs::path& output, bool directory_output = false);
 ExtractionReport extract_paged_archive(const fs::path& directory, const fs::path& output,
                                        const Password* password = nullptr, bool restore_attributes = true, ReadProgress* progress = nullptr);
 }

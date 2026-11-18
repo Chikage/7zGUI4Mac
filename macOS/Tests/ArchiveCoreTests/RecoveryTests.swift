@@ -17,22 +17,20 @@ import Testing
     let right = try fixture.file("right/same.txt", contents: "right")
     _ = try fixture.file("right/unselected.txt", contents: "do not archive")
     let quoted = try fixture.file("资料/含\"引号.txt")
-    let output = fixture.root.appendingPathComponent("selected.rz", isDirectory: true)
+    let output = fixture.root.appendingPathComponent("selected.rz", isDirectory: false)
     _ = try await fixture.service.compress(
         [left, right, quoted, left], to: output,
         options: CompressionOptions(format: .recovery))
-    let volumes = try FileManager.default.contentsOfDirectory(
-        at: output, includingPropertiesForKeys: [.fileSizeKey]
-    ).filter { ["rzv", "rzr"].contains($0.pathExtension) }
-    #expect(volumes.count == 12)
+    let container = try RecoveryContainerFixture(output)
+    #expect(container.dataVolumes + container.recoveryVolumes == 12)
     let listing = try await fixture.service.list(output)
     #expect(listing.supportsRecovery)
     #expect(!listing.isEncrypted)
-    #expect(listing.physicalSize > 0)
+    #expect(listing.physicalSize == Int64(container.bytes.count))
     #expect(listing.recoveryDetails?.profile == 5)
     #expect(listing.preservesMetadata)
     let details = try #require(listing.recoveryDetails)
-    #expect(try volumes.allSatisfy { Int64(try $0.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) == details.volumeSizeBytes })
+    #expect(Int64(container.volumeSize) == details.volumeSizeBytes)
     #expect(
         Set(listing.entries.filter { !$0.isDirectory }.map(\.path)) == [
             "left/same.txt", "right/same.txt", "资料/含\"引号.txt",
@@ -47,8 +45,9 @@ import Testing
     let fixture = try Fixture()
     defer { fixture.cleanup() }
     let source = try fixture.file("source.txt")
-    let archive = fixture.root.appendingPathComponent("archive.rz", isDirectory: true)
+    let archive = fixture.root.appendingPathComponent("archive.rz", isDirectory: false)
     _ = try await fixture.service.compress([source], to: archive, options: CompressionOptions(format: .recovery))
+    try convertToLegacyRZDirectory(archive)
     try FileManager.default.removeItem(at: archive.appendingPathComponent("d000000.rzv"))
     try FileManager.default.removeItem(at: archive.appendingPathComponent("manifest.rzm"))
     let member = archive.appendingPathComponent("p000000.rzr")
@@ -61,7 +60,7 @@ import Testing
     let extracted = fixture.root.appendingPathComponent("extract-before-repair")
     await #expect(throws: ArchiveError.self) { try await fixture.service.extract(member, to: extracted) }
     #expect(!FileManager.default.fileExists(atPath: extracted.path))
-    let repaired = fixture.root.appendingPathComponent("repaired.rz", isDirectory: true)
+    let repaired = fixture.root.appendingPathComponent("repaired.rz", isDirectory: false)
     _ = try await fixture.service.repair(member, to: repaired)
     try await fixture.service.test(repaired)
     #expect(!FileManager.default.fileExists(atPath: archive.appendingPathComponent("d000000.rzv").path))
@@ -74,16 +73,16 @@ import Testing
     let fixture = try Fixture()
     defer { fixture.cleanup() }
     let source = try fixture.file("source.txt")
-    let archive = fixture.root.appendingPathComponent("archive.rz", isDirectory: true)
+    let archive = fixture.root.appendingPathComponent("archive.rz", isDirectory: false)
     _ = try await fixture.service.compress([source], to: archive, options: CompressionOptions(format: .recovery))
     for name in ["d000000.rzv", "p000000.rzr", "p000001.rzr"] {
-        try FileManager.default.removeItem(at: archive.appendingPathComponent(name))
+        try damageRZMember(in: archive, name: name)
     }
     do {
         try await fixture.service.test(archive)
         Issue.record("Unrecoverable archive passed verification")
     } catch ArchiveError.recoveryUnrecoverable {}
-    let output = fixture.root.appendingPathComponent("failed.rz", isDirectory: true)
+    let output = fixture.root.appendingPathComponent("failed.rz", isDirectory: false)
     do {
         _ = try await fixture.service.repair(archive, to: output)
         Issue.record("Unrecoverable archive was repaired")
@@ -138,7 +137,7 @@ import Testing
     let handle = try FileHandle(forWritingTo: file)
     try handle.truncate(atOffset: 2 * 1024 * 1024 * 1024)
     try handle.close()
-    let output = fixture.root.appendingPathComponent("cancelled.rz", isDirectory: true)
+    let output = fixture.root.appendingPathComponent("cancelled.rz", isDirectory: false)
     let (stream, continuation) = AsyncStream<Void>.makeStream()
     let task = Task {
         try await fixture.service.compress([file], to: output, options: CompressionOptions(format: .recovery)) { _ in

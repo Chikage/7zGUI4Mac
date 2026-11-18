@@ -135,7 +135,7 @@ struct CreateArchiveSheet: View {
         do {
             try ArchivePath.validateFilename(name)
             let destination = directory.appendingPathComponent(
-                name + "." + format.rawValue, isDirectory: format == .recovery)
+                name + "." + format.rawValue, isDirectory: false)
             guard !FileManager.default.fileExists(atPath: destination.path) else {
                 validation = "同名文件已存在，请修改名称或保存位置。"
                 return

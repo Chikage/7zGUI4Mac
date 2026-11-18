@@ -2,6 +2,9 @@
 
 命令行工具 `rz` 和 macOS 应用仅支持 **RZ 第 5 版（profile 5）**。创建归档默认使用 10 个数据卷和 2 个恢复卷，也可以显式传入 `--profile 5`。已有第 1 至第 4 版归档请用对应的旧版工具处理。
 
+从 `rz 0.8.0` 起，默认输出为单个 `.rz` 容器文件，内含原有 profile 5 索引、数据卷及恢复卷。
+新版本继续读取旧版目录归档；旧版本工具不能直接读取新容器。容器布局见 [单文件封装](docs/CONTAINER-V1.md)。
+
 ## 构建和测试
 
 需要 CMake 3.24+、支持 C++20 的编译器和 Python 3.9+（仅测试需要）。
@@ -49,9 +52,18 @@ recovery/build/rz repair archive.rz repaired.rz
 recovery/build/rz extract repaired.rz extracted
 ```
 
-`--data-volumes K` 和 `--recovery-volumes M` 成对使用，要求 `1 ≤ M ≤ K ≤ 100`。输出目录必须位于输入之外，父目录须已存在。数据卷和恢复卷使用相同的物理大小，由压缩后的内容和索引共同决定。
+`--data-volumes K` 和 `--recovery-volumes M` 成对使用，要求 `1 ≤ M ≤ K ≤ 100`。输出文件必须位于输入目录之外，父目录须已存在。容器内的数据卷和恢复卷使用相同的物理大小，由压缩后的内容和索引共同决定。
 
-同一卷集的 `d000000.rzv` 等数据卷、`p000000.rzr` 等恢复卷及 `manifest.rzm` 放在同一目录，保留原卷名。每卷首尾以及独立索引文件各有一份启动元数据。只要其余卷完整且至少一份启动元数据可读取，丢失任意 M 卷均可修复。修复写入新目录，成功发布前会重新打开整套分卷验证。
+容器将 `manifest.rzm`、`d000000.rzv` 等数据卷和 `p000000.rzr` 等恢复卷连续存储，首尾各有一份带校验的容器头。读取按偏移直接访问，无需先展开容器。只要容器布局可读取、其余卷完整且至少一份启动元数据可读取，损坏任意 M 个内部卷均可修复；整个容器文件丢失无法自行恢复。修复写入新的容器文件，发布前会重新打开并验证。
+
+旧版目录仍可直接列出、验证、解压和修复。用 `rz repair 旧目录 新文件.rz` 可将其重建为新容器。需要独立分卷时，创建或修复命令可加 `--directory`：
+
+```sh
+rz create input legacy.rz --directory
+rz repair archive.rz loose-volumes --directory
+```
+
+此模式生成目录，分卷必须保留原文件名并放在同一目录；可供旧版 profile 5 工具读取。
 
 ## 加密与文件属性
 
@@ -74,7 +86,7 @@ recovery/build/rz extract repaired.rz extracted
 - 内容按最多 4 MiB 的独立 Zstd 帧压缩。数据和索引分别按 64 KiB 块进行 Reed–Solomon 编码。启动元数据最多 8 KiB，根表和分页摘要由恢复卷保护。小文件集也需要至少一个数据条带和一个索引条带。
 - 仅保存普通文件和目录，包括空文件和空目录。硬链接按独立文件保存，源目录在创建期间应保持稳定。
 - 创建默认使用 `--threads auto`，也可指定 1–64 个线程。压缩和恢复编码各使用 256 MiB 的有界工作池，最终分卷封装及完整存储扫描最多使用 4 路并行 IO。
-- 暂存空间包含压缩流、分页摘要和最终分卷。发布前同步文件与目录，普通失败或取消会清理暂存目录。
+- 暂存空间包含压缩流、分页摘要和分卷。容器组装以 1 MiB 缓冲逐卷复制，复制完成即删除该暂存卷，避免长期保留两套完整副本。发布前同步文件与目录，普通失败或取消会清理暂存目录。
 
 ## 退出码
 
@@ -113,6 +125,7 @@ python3 recovery/benchmarks/parallel_recovery.py recovery/build/rz --output /tmp
 
 ## 实现文档
 
+- [单文件容器布局](docs/CONTAINER-V1.md)
 - [第 5 版磁盘布局](docs/FORMAT-V5.md)
 - [算法与格式规范](docs/RZ-SPEC.md)
 - [依赖来源、校验值和许可证](vendor/PROVENANCE.md)

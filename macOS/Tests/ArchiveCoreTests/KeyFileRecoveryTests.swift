@@ -35,7 +35,7 @@ func keyFileCreationAutoUnlockManualUnlockAndRepair(encryption: RecoveryEncrypti
     } catch ArchiveError.keyFileRequired {}
     #expect(!FileManager.default.fileExists(atPath: output.path))
     #expect(try await !fixture.service.list(renamed, keyFile: backup).isLocked)
-    try FileManager.default.removeItem(at: renamed.appendingPathComponent("d000000.rzv"))
+    try damageRZMember(in: renamed, name: "d000000.rzv")
     let repaired = fixture.root.appendingPathComponent("repaired.rz")
     _ = try await fixture.service.repair(renamed, to: repaired)
     #expect(try await fixture.service.list(repaired).isLocked)

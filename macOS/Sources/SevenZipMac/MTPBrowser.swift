@@ -8,7 +8,7 @@ struct MTPBrowserSidebar: View {
     @Bindable var mtp: MTPBrowserStore
 
     var body: some View {
-        Section("MTP 设备") {
+        Section {
             ForEach(mtp.devices) { device in
                 Button {
                     store.navigate(to: MTPDirectory(device: device))
@@ -28,13 +28,23 @@ struct MTPBrowserSidebar: View {
                 Text("连接设备，解锁后选择“文件传输 / MTP”，再刷新。")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Button {
-                mtp.scan()
-            } label: {
-                Label(mtp.isScanning ? "正在查找设备…" : "刷新 MTP 设备", systemImage: "arrow.clockwise")
+        } header: {
+            HStack {
+                Text("MTP 设备")
+                Spacer(minLength: 8)
+                Button {
+                    mtp.scan()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).disabled(!store.canNavigateBrowser)
+                .help(mtp.isScanning ? "正在查找设备…" : "刷新 MTP 设备")
+                .accessibilityLabel(mtp.isScanning ? "正在查找 MTP 设备" : "刷新 MTP 设备")
+                .accessibilityIdentifier("mtp-refresh-devices")
             }
-            .buttonStyle(.plain).disabled(!store.canNavigateBrowser)
-            .accessibilityIdentifier("mtp-refresh-devices")
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .task(id: store.canNavigateBrowser) {
             if store.canNavigateBrowser { mtp.scanIfNeeded() }

@@ -30,7 +30,6 @@
             <key>CFBundleTypeRole</key><string>Editor</string>
             <key>LSHandlerRank</key><string>Owner</string>
             <key>LSItemContentTypes</key><array><string>io.chikage.recovery-archive</string></array>
-            <key>LSTypeIsPackage</key><true/>
             <key>CFBundleTypeIconFile</key><string>AppIcon</string>
         </dict>
         <dict>
@@ -53,10 +52,13 @@
     <array>
         <dict>
             <key>UTTypeIdentifier</key><string>io.chikage.recovery-archive</string>
-            <key>UTTypeDescription</key><string>可恢复 RZ 归档包</string>
-            <key>UTTypeConformsTo</key><array><string>com.apple.package</string></array>
+            <key>UTTypeDescription</key><string>可恢复 RZ 容器归档</string>
+            <key>UTTypeConformsTo</key><array><string>public.data</string><string>public.archive</string></array>
             <key>UTTypeTagSpecification</key>
-            <dict><key>public.filename-extension</key><array><string>rz</string></array></dict>
+            <dict>
+                <key>public.filename-extension</key><array><string>rz</string></array>
+                <key>public.mime-type</key><string>application/x-rz</string>
+            </dict>
             <key>UTTypeIconFile</key><string>AppIcon</string>
         </dict>
     </array>

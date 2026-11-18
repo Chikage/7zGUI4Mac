@@ -6,10 +6,11 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from legacy_storage import legacy_args
 
 binary, no_aes = sys.argv[1:]
 def run(exe, *args, password=None, code=0):
-    p = subprocess.run([exe, *map(str, args)], input=None if password is None else password + '\n', text=True, capture_output=True)
+    p = subprocess.run([exe, *map(str, legacy_args(args))], input=None if password is None else password + '\n', text=True, capture_output=True)
     assert p.returncode == code, (args, p.returncode, p.stdout, p.stderr)
     return p
 def hashes(path):

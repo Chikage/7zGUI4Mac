@@ -12,7 +12,7 @@ struct RepairArchiveSheet: View {
         VStack(spacing: 0) {
             SheetHeader(title: "修复归档", subtitle: store.listing?.url.lastPathComponent ?? "", symbol: "bandage")
             VStack(alignment: .leading, spacing: 20) {
-                Text("使用可用分卷和恢复卷生成完整副本，原有归档会保留。请先将找到的分卷放回同一个归档包。")
+                Text("使用恢复数据生成新的 .rz 容器文件，原有归档会保留。修复旧版目录归档时，请先将找到的分卷放回同一目录。")
                     .font(.subheadline).foregroundStyle(.secondary)
                 if store.listing?.isEncrypted == true {
                     Text("修复无需密码或密钥，只校验密文存储。完成后仍需解锁并进行完整性测试，才能验证加密内容。")
@@ -57,7 +57,7 @@ struct RepairArchiveSheet: View {
     private func submit() {
         do {
             try ArchivePath.validateFilename(name)
-            let output = directory.appendingPathComponent(name + ".rz", isDirectory: true)
+            let output = directory.appendingPathComponent(name + ".rz", isDirectory: false)
             guard !FileManager.default.fileExists(atPath: output.path) else {
                 validation = "同名归档已存在，请修改名称或保存位置。"
                 return

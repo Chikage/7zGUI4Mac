@@ -32,7 +32,8 @@ def measure(binary, source, output, threads, k, m):
             result[key.replace('_us', '_ms')] = timing[key] / 1000
         result['recovery_workers'] = timing['recovery_workers']
         result['recovery_estimated_mib'] = timing['recovery_estimated_bytes'] / 1024 / 1024
-    shutil.rmtree(output)
+    if output.is_dir(): shutil.rmtree(output)  # Older reference engines emit a directory.
+    else: output.unlink()
     return result
 
 

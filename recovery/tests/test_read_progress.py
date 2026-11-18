@@ -6,12 +6,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from legacy_storage import legacy_args
 
 BIN = str(Path(sys.argv.pop(1)).resolve())
 
 
 def run(*args, password=None):
-    return subprocess.run([BIN, *map(str, args)], input=password, text=True,
+    return subprocess.run([BIN, *map(str, legacy_args(args))], input=password, text=True,
                           capture_output=True, timeout=60)
 
 

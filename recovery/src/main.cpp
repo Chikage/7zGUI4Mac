@@ -10,25 +10,27 @@
 namespace {
 void signal_handler(int signal) { rz::interrupted.store(signal, std::memory_order_relaxed); }
 void usage() {
-    std::cout << "rz 0.7.0 — recoverable volumes with protected paginated indexes\n"
+    std::cout << "rz 0.8.0 — recoverable single-file containers with protected paginated indexes\n"
         "  rz --capabilities\n"
-        "  rz create INPUT_DIRECTORY OUTPUT_SET [OPTIONS]\n"
-        "  rz create-selected OUTPUT_SET [OPTIONS] -- INPUT...\n"
-        "  rz list SET_DIRECTORY [--json] [--password-stdin]\n"
-        "  rz verify SET_DIRECTORY [--password-stdin] [--progress]\n"
-        "  rz repair SET_DIRECTORY NEW_SET_DIRECTORY\n"
-        "  rz extract SET_DIRECTORY NEW_OUTPUT_DIRECTORY [--password-stdin] [--no-attributes] [--json] [--progress]\n"
+        "  rz create INPUT_DIRECTORY OUTPUT.rz [OPTIONS]\n"
+        "  rz create-selected OUTPUT.rz [OPTIONS] -- INPUT...\n"
+        "  rz list ARCHIVE [--json] [--password-stdin]\n"
+        "  rz verify ARCHIVE [--password-stdin] [--progress]\n"
+        "  rz repair ARCHIVE NEW_OUTPUT.rz [--directory]\n"
+        "  rz extract ARCHIVE NEW_OUTPUT_DIRECTORY [--password-stdin] [--no-attributes] [--json] [--progress]\n"
         "OPTIONS: --data-volumes K --recovery-volumes M (1 <= M <= K <= 100)\n"
         "         Exactly K+M equal-sized volumes; any M missing volumes are recoverable.\n"
         "         --encrypt --password-stdin (content, names and attributes encrypted)\n"
         "      OR --generate-key-file (creates sibling NAME.rzkey; defaults to dual encryption)\n"
         "         --encryption standard|dual (default standard; dual adds AES-256-GCM)\n"
         "         --no-metadata (omit file attributes; default preserves them)\n"
+        "         --directory (create/repair: write legacy loose volumes instead of a container)\n"
         "         --progress (create/verify/extract; stderr)\n"
         "         --threads auto|N (1..64 workers per compression/recovery phase; each capped at 256 MiB)\n"
         "         --profile 5 (default; 10+2 volumes; paginated protected index; 1 TiB content limit)\n"
         "READ:    --key-file FILE | --auto-key-file (find matching sibling .rzkey by archive ID)\n"
-        "Encrypted sets can be repaired without a password.\n"
+        "ARCHIVE accepts a container file or a legacy volume directory.\n"
+        "Encrypted archives can be repaired without a password.\n"
         "verify without a password checks ciphertext storage only.\n"
         "Exit: 0 success, 2 repairable, 3 unrecoverable, 4 password required/incorrect,\n"
         "      5 extracted with metadata warnings, 6 matching key file required; other errors: 1.\n";
@@ -45,7 +47,7 @@ struct CreateOptions {
     rz::RecoveryOptions recovery;
     uint32_t crypto_suite = rz::CryptoProfile;
     bool encrypt = false, metadata = true, metadata_explicit = false, password_stdin = false;
-    bool progress = false;
+    bool progress = false, directory_output = false;
     bool generate_key_file = false;
     uint32_t threads = 0;
 };
@@ -55,6 +57,7 @@ CreateOptions parse_options(int argc, char** argv, int& position) {
         std::string flag = argv[position++];
         if (!seen.insert(flag).second) throw std::runtime_error("Duplicate option");
         if (flag == "--progress") { out.progress = true; continue; }
+        if (flag == "--directory") { out.directory_output = true; continue; }
         if (flag == "--encrypt") { out.encrypt = true; continue; }
         if (flag == "--generate-key-file") { out.generate_key_file = true; out.encrypt = true; continue; }
         if (flag == "--password-stdin") { out.password_stdin = true; continue; }
@@ -207,7 +210,7 @@ int main(int argc, char** argv) {
             if (options.password_stdin) password.emplace(rz::read_password());
             if (options.generate_key_file) password.emplace(rz::generate_recovery_key());
             rz::SecurityOptions security{options.encrypt, options.metadata, password ? &*password : nullptr, options.crypto_suite, options.generate_key_file};
-            rz::create_paged_archive(plan, output, options.recovery, security, options.progress, options.threads);
+            rz::create_paged_archive(plan, output, options.recovery, security, options.progress, options.threads, options.directory_output);
             std::cout << "Created " << output << '\n';
         } else if (command == "list" && argc >= 3) {
             auto options = read_options(argc, argv, 3, true, false, true);
@@ -234,8 +237,8 @@ int main(int argc, char** argv) {
                 << " password_authentication=" << (options.password_stdin ? "requested" : "not_requested")
                 << " key_file_authentication=" << (password && password->from_key_file ? "requested" : "not_requested") << '\n';
             return result.exit_code();
-        } else if (command == "repair" && argc == 4) {
-            rz::repair_paged_archive(argv[2], argv[3]);
+        } else if (command == "repair" && (argc == 4 || (argc == 5 && std::string(argv[4]) == "--directory"))) {
+            rz::repair_paged_archive(argv[2], argv[3], argc == 5);
             std::cout << "Reconstructed and storage-checked " << argv[3] << "; encrypted content authentication requires its password or key file.\n";
         } else if (command == "extract" && argc >= 4) {
             auto options = read_options(argc, argv, 4, true, true, true, true);

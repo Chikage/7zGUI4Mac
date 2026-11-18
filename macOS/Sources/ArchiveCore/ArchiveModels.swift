@@ -89,7 +89,7 @@ public enum ArchiveFormat: String, CaseIterable, Identifiable, Sendable {
         case .zip: "ZIP 便于跨平台分享；加密 ZIP 需要支持 AES 的解压软件。"
         case .tar: "TAR 仅打包文件，不压缩，也不支持密码。"
         case .rar: "RAR 支持分卷、AES-256 加密、恢复记录和 REV 恢复卷。"
-        case .recovery: "生成带恢复卷的归档包，适合需要防损坏的资料保存。此实验格式仅本应用支持。"
+        case .recovery: "生成内含恢复数据的单个 .rz 容器文件，适合需要防损坏的资料保存。此实验格式仅本应用支持。"
         }
     }
 }

@@ -9,7 +9,7 @@ func encryptedRecoveryCanRepairBeforeUnlocking(encryption: RecoveryEncryption) a
     let fixture = try Fixture()
     defer { fixture.cleanup() }
     let source = try fixture.file("private-name.txt", contents: "private content")
-    let archive = fixture.root.appendingPathComponent("encrypted.rz", isDirectory: true)
+    let archive = fixture.root.appendingPathComponent("encrypted.rz", isDirectory: false)
     _ = try await fixture.service.compress(
         [source], to: archive,
         options: CompressionOptions(format: .recovery, password: "true", recoveryEncryption: encryption))
@@ -25,10 +25,10 @@ func encryptedRecoveryCanRepairBeforeUnlocking(encryption: RecoveryEncryption) a
     #expect(!unlocked.isLocked && unlocked.isEncrypted)
     #expect(unlocked.recoveryEncryption == encryption)
     #expect(unlocked.entries.first?.path == "private-name.txt")
-    try FileManager.default.removeItem(at: archive.appendingPathComponent("d000000.rzv"))
+    try damageRZMember(in: archive, name: "d000000.rzv")
     let stillLocked = try await fixture.service.list(archive)
     #expect(stillLocked.isLocked)
-    let repaired = fixture.root.appendingPathComponent("fixed.rz", isDirectory: true)
+    let repaired = fixture.root.appendingPathComponent("fixed.rz", isDirectory: false)
     _ = try await fixture.service.repair(archive, to: repaired)
     try await fixture.service.test(repaired, password: "true")
     let output = fixture.root.appendingPathComponent("out")
@@ -91,7 +91,7 @@ func encryptedRecoveryCanRepairBeforeUnlocking(encryption: RecoveryEncryption) a
     let value = Data([0, 1, 2, 255, 0, 30])
     let status = value.withUnsafeBytes { setxattr(source.path, "user.rz-test", $0.baseAddress, $0.count, 0, 0) }
     #expect(status == 0)
-    let archive = fixture.root.appendingPathComponent("attrs.rz", isDirectory: true)
+    let archive = fixture.root.appendingPathComponent("attrs.rz", isDirectory: false)
     _ = try await fixture.service.compress([source], to: archive, options: CompressionOptions(format: .recovery))
     let out = fixture.root.appendingPathComponent("out")
     let result = try await fixture.service.extract(archive, to: out)
@@ -110,7 +110,7 @@ func encryptedRecoveryCanRepairBeforeUnlocking(encryption: RecoveryEncryption) a
     defer { fixture.cleanup() }
     let source = try fixture.file("special.txt")
     #expect(chmod(source.path, 0o4755) == 0)
-    let archive = fixture.root.appendingPathComponent("special.rz", isDirectory: true)
+    let archive = fixture.root.appendingPathComponent("special.rz", isDirectory: false)
     _ = try await fixture.service.compress(
         [source], to: archive, options: CompressionOptions(format: .recovery, password: "true"))
     let result = try await fixture.service.extract(
@@ -129,7 +129,7 @@ func encryptedRecoveryCanRepairBeforeUnlocking(encryption: RecoveryEncryption) a
     let fixture = try Fixture()
     defer { fixture.cleanup() }
     let source = try fixture.file("plain.txt")
-    let archive = fixture.root.appendingPathComponent("plain.rz", isDirectory: true)
+    let archive = fixture.root.appendingPathComponent("plain.rz", isDirectory: false)
     _ = try await fixture.service.compress(
         [source], to: archive,
         options: CompressionOptions(format: .recovery, preserveMetadata: false))
@@ -138,7 +138,7 @@ func encryptedRecoveryCanRepairBeforeUnlocking(encryption: RecoveryEncryption) a
 }
 
 @Test func protectedListingRetainsEncryptionForEmptyArchives() throws {
-    let url = URL(fileURLWithPath: "/empty.rz", isDirectory: true)
+    let url = URL(fileURLWithPath: "/empty.rz", isDirectory: false)
     let json = try recoveryListingJSON(["encrypted": true, "locked": true, "encryptionSuite": 1, "preservesMetadata": true])
     let listing = try RecoveryListingParser.parse(json, url: url, physicalSize: 0)
     #expect(listing.isEncrypted && listing.isLocked && listing.preservesMetadata)

@@ -13,12 +13,13 @@ import sys
 import tempfile
 import time
 import unittest
+from legacy_storage import legacy_args
 
 BIN = str(Path(sys.argv.pop(1)).resolve())
 
 
 def run(*args, code=0, **kwargs):
-    p = subprocess.run([BIN, *map(str, args)], capture_output=True, text=True, timeout=180, **kwargs)
+    p = subprocess.run([BIN, *map(str, legacy_args(args))], capture_output=True, text=True, timeout=180, **kwargs)
     if p.returncode != code:
         raise AssertionError(f'{args}: expected {code}, got {p.returncode}\n{p.stdout}\n{p.stderr}')
     return p
